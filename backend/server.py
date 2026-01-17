@@ -205,11 +205,7 @@ async def log_habit(habit_data: HabitLogCreate):
     await db.habit_logs.insert_one(habit_log.model_dump())
     return habit_log
 
-@api_router.get("/habits/{user_id}/{date}")
-async def get_habits_for_date(user_id: str, date: str):
-    logs = await db.habit_logs.find({"user_id": user_id, "date": date}).to_list(100)
-    return [HabitLog(**log) for log in logs]
-
+# IMPORTANT: Static route must come before dynamic route
 @api_router.get("/habits/{user_id}/streaks")
 async def get_habit_streaks(user_id: str):
     user = await db.users.find_one({"id": user_id})
@@ -241,6 +237,11 @@ async def get_habit_streaks(user_id: str):
         streaks[habit] = streak
     
     return streaks
+
+@api_router.get("/habits/{user_id}/{date}")
+async def get_habits_for_date(user_id: str, date: str):
+    logs = await db.habit_logs.find({"user_id": user_id, "date": date}).to_list(100)
+    return [HabitLog(**log) for log in logs]
 
 # ==================== DAILY LOG ENDPOINTS ====================
 
