@@ -10,6 +10,7 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
+      "bundleIdentifier": "com.rik.lifecoach",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Rik needs microphone access for voice commands and wake word detection",
         "NSSpeechRecognitionUsageDescription": "Rik uses speech recognition to understand your voice commands",
@@ -17,6 +18,7 @@
       }
     },
     "android": {
+      "package": "com.rik.lifecoach",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#0a0a0f"
@@ -50,10 +52,23 @@
         {
           "locationAlwaysAndWhenInUsePermission": "Rik tracks your location to remind you based on where you are"
         }
+      ],
+      [
+        "@react-native-voice/voice",
+        {
+          "microphonePermission": "Rik needs microphone access for voice commands",
+          "speechRecognitionPermission": "Rik uses speech recognition to understand your commands"
+        }
       ]
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "rik-life-coach"
+      }
+    },
+    "owner": "your-expo-username"
   }
 }
