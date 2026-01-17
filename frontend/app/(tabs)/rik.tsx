@@ -147,12 +147,38 @@ export default function RikScreen() {
     }
   };
 
-  const speak = (text: string) => {
+  const speak = async (text: string) => {
+    // Stop any ongoing speech first
+    await Speech.stop();
+    
+    // Get available voices and try to use a better one
+    const voices = await Speech.getAvailableVoicesAsync();
+    
+    // Try to find a good male voice (Rik should sound confident)
+    // On iOS: "com.apple.ttsbundle.Daniel-compact" or "com.apple.voice.compact.en-GB.Daniel"
+    // On Android: varies by device
+    let selectedVoice = voices.find(v => 
+      v.name?.toLowerCase().includes('daniel') || 
+      v.name?.toLowerCase().includes('james') ||
+      v.name?.toLowerCase().includes('tom') ||
+      v.identifier?.includes('Daniel')
+    )?.identifier;
+    
+    // Fallback to any English male-sounding voice
+    if (!selectedVoice) {
+      selectedVoice = voices.find(v => 
+        v.language?.startsWith('en') && 
+        (v.name?.toLowerCase().includes('male') || v.quality === 'Enhanced')
+      )?.identifier;
+    }
+    
     Speech.speak(text, {
-      language: 'en-US',
-      pitch: 1.0,
-      rate: 0.95,
+      language: 'en-GB', // British English often sounds cleaner
+      pitch: 0.95, // Slightly lower pitch for authority
+      rate: 1.0, // Natural speed - not too slow
+      voice: selectedVoice,
       onDone: () => resetInactivityTimer(),
+      onError: (error) => console.log('Speech error:', error),
     });
   };
 
