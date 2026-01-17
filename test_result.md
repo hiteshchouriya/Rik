@@ -119,7 +119,7 @@ backend:
 
   - task: "Habit Tracking API - Log/Get/Streaks"
     implemented: true
-    working: true
+    working: false
     file: "server.py"
     stuck_count: 0
     priority: "high"
@@ -128,6 +128,9 @@ backend:
       - working: true
         agent: "main"
         comment: "Tested with curl - habit logging and streaks working"
+      - working: false
+        agent: "testing"
+        comment: "Critical issue found: habit streaks endpoint returning empty list [] instead of dictionary with habit names and streak counts. Habit logging and retrieval work correctly, but streaks calculation is broken. This affects core habit tracking functionality."
 
   - task: "Daily Log API - Create/Get"
     implemented: true
