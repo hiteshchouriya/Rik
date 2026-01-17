@@ -15,7 +15,7 @@ export default function Index() {
     try {
       const userId = await AsyncStorage.getItem('userId');
       if (userId) {
-        router.replace('/(tabs)/home');
+        router.replace('/(tabs)/rik');
       } else {
         router.replace('/onboarding');
       }
@@ -30,7 +30,7 @@ export default function Index() {
   return (
     <View style={styles.container}>
       <ActivityIndicator size="large" color="#6366f1" />
-      <Text style={styles.text}>Loading...</Text>
+      <Text style={styles.text}>Loading Rik...</Text>
     </View>
   );
 }

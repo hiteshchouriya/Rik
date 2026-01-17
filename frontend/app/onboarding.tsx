@@ -15,28 +15,20 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
+import * as Speech from 'expo-speech';
 
 const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
-const STEPS = [
-  'welcome',
-  'basics',
-  'career',
-  'routine',
-  'habits_build',
-  'habits_quit',
-  'goals',
-  'assistant_mode',
+const STEPS = ['welcome', 'basics', 'situation', 'struggles', 'routine', 'habits', 'ready'];
+
+const COMMON_STRUGGLES = [
+  'Smoking', 'Procrastination', 'Social Media Addiction', 'Lack of Focus',
+  'Poor Sleep', 'Unhealthy Eating', 'No Exercise', 'Overthinking'
 ];
 
-const COMMON_HABITS_BUILD = [
-  'Exercise', 'Reading', 'Meditation', 'Learning', 'Healthy Eating',
-  'Sleep Early', 'Journaling', 'Hydration', 'Walking', 'Stretching'
-];
-
-const COMMON_HABITS_QUIT = [
-  'Smoking', 'Excessive Screen Time', 'Procrastination', 'Junk Food',
-  'Social Media Scrolling', 'Late Nights', 'Negative Self-Talk', 'Oversleeping'
+const GOOD_HABITS = [
+  'Exercise', 'Reading', 'Meditation', 'Learning New Skills',
+  'Healthy Eating', 'Early Sleep', 'Journaling', 'Hydration'
 ];
 
 export default function Onboarding() {
@@ -53,18 +45,31 @@ export default function Onboarding() {
     sleep_time: '22:00',
     work_start: '09:00',
     work_end: '18:00',
+    assistant_mode: 'strict',
     habits_to_build: [] as string[],
     habits_to_quit: [] as string[],
-    goals: [] as string[],
-    assistant_mode: 'moderate',
+    daily_challenges: [] as string[],
+    preferred_gym_time: '',
+    commute_method: '',
   });
-  
-  const [customHabit, setCustomHabit] = useState('');
-  const [customGoal, setCustomGoal] = useState('');
+
+  const speak = (text: string) => {
+    Speech.speak(text, {
+      language: 'en-US',
+      pitch: 1.0,
+      rate: 0.95,
+    });
+  };
 
   const handleNext = () => {
     if (currentStep < STEPS.length - 1) {
       setCurrentStep(currentStep + 1);
+      // Rik speaks on certain steps
+      if (STEPS[currentStep + 1] === 'struggles') {
+        speak("Be honest with me. What's holding you back?");
+      } else if (STEPS[currentStep + 1] === 'ready') {
+        speak(`Alright ${formData.name}, I've got everything I need. Let's transform your life.`);
+      }
     } else {
       handleSubmit();
     }
@@ -76,38 +81,12 @@ export default function Onboarding() {
     }
   };
 
-  const toggleHabitBuild = (habit: string) => {
+  const toggleItem = (array: string[], item: string, field: string) => {
     setFormData(prev => ({
       ...prev,
-      habits_to_build: prev.habits_to_build.includes(habit)
-        ? prev.habits_to_build.filter(h => h !== habit)
-        : [...prev.habits_to_build, habit]
-    }));
-  };
-
-  const toggleHabitQuit = (habit: string) => {
-    setFormData(prev => ({
-      ...prev,
-      habits_to_quit: prev.habits_to_quit.includes(habit)
-        ? prev.habits_to_quit.filter(h => h !== habit)
-        : [...prev.habits_to_quit, habit]
-    }));
-  };
-
-  const addCustomGoal = () => {
-    if (customGoal.trim()) {
-      setFormData(prev => ({
-        ...prev,
-        goals: [...prev.goals, customGoal.trim()]
-      }));
-      setCustomGoal('');
-    }
-  };
-
-  const removeGoal = (goal: string) => {
-    setFormData(prev => ({
-      ...prev,
-      goals: prev.goals.filter(g => g !== goal)
+      [field]: prev[field as keyof typeof prev].includes(item)
+        ? (prev[field as keyof typeof prev] as string[]).filter(i => i !== item)
+        : [...(prev[field as keyof typeof prev] as string[]), item]
     }));
   };
 
@@ -117,6 +96,7 @@ export default function Onboarding() {
       const payload = {
         ...formData,
         age: parseInt(formData.age) || 25,
+        habits_to_quit: formData.daily_challenges, // What they struggle with = habits to quit
       };
       
       const response = await fetch(`${API_URL}/api/users`, {
@@ -125,18 +105,18 @@ export default function Onboarding() {
         body: JSON.stringify(payload),
       });
       
-      if (!response.ok) {
-        throw new Error('Failed to create profile');
-      }
+      if (!response.ok) throw new Error('Failed to create profile');
       
       const user = await response.json();
       await AsyncStorage.setItem('userId', user.id);
       await AsyncStorage.setItem('userName', user.name);
       
-      router.replace('/(tabs)/home');
+      speak(`Welcome aboard, ${user.name}. I'm Rik, and starting now, I run your day. Say my name when you need me.`);
+      
+      router.replace('/(tabs)/rik');
     } catch (error) {
-      console.error('Error creating profile:', error);
-      Alert.alert('Error', 'Failed to create your profile. Please try again.');
+      console.error('Error:', error);
+      Alert.alert('Error', 'Failed to create profile');
     } finally {
       setIsLoading(false);
     }
@@ -147,28 +127,30 @@ export default function Onboarding() {
       case 'welcome':
         return (
           <View style={styles.stepContainer}>
-            <Ionicons name="rocket" size={80} color="#6366f1" />
-            <Text style={styles.title}>Life Transformation{"\n"}Assistant</Text>
+            <View style={styles.rikAvatar}>
+              <Ionicons name="fitness" size={60} color="#6366f1" />
+            </View>
+            <Text style={styles.title}>Meet Rik</Text>
             <Text style={styles.subtitle}>
-              Your AI-powered personal coach to help you achieve your goals,
-              build better habits, and transform your life.
+              Your strict AI life coach who will run your day, track your progress,
+              and push you towards your goals. No excuses.
             </Text>
             <View style={styles.featureList}>
               <View style={styles.featureItem}>
-                <Ionicons name="checkmark-circle" size={24} color="#10b981" />
-                <Text style={styles.featureText}>Personalized daily routines</Text>
+                <Ionicons name="mic" size={24} color="#10b981" />
+                <Text style={styles.featureText}>Voice activated - just say "Rik"</Text>
               </View>
               <View style={styles.featureItem}>
-                <Ionicons name="checkmark-circle" size={24} color="#10b981" />
-                <Text style={styles.featureText}>AI-powered coaching & analysis</Text>
+                <Ionicons name="calendar" size={24} color="#10b981" />
+                <Text style={styles.featureText}>Generates your daily schedule</Text>
               </View>
               <View style={styles.featureItem}>
-                <Ionicons name="checkmark-circle" size={24} color="#10b981" />
-                <Text style={styles.featureText}>Habit tracking & streaks</Text>
+                <Ionicons name="location" size={24} color="#10b981" />
+                <Text style={styles.featureText}>Tracks where you are</Text>
               </View>
               <View style={styles.featureItem}>
-                <Ionicons name="checkmark-circle" size={24} color="#10b981" />
-                <Text style={styles.featureText}>Evening performance reviews</Text>
+                <Ionicons name="alert-circle" size={24} color="#10b981" />
+                <Text style={styles.featureText}>Calls you out when slacking</Text>
               </View>
             </View>
           </View>
@@ -177,14 +159,14 @@ export default function Onboarding() {
       case 'basics':
         return (
           <View style={styles.stepContainer}>
-            <Text style={styles.stepTitle}>Let's get to know you</Text>
-            <Text style={styles.stepSubtitle}>Basic information to personalize your experience</Text>
+            <Text style={styles.stepTitle}>Who am I coaching?</Text>
+            <Text style={styles.stepSubtitle}>Basic info so I know who I'm dealing with</Text>
             
             <View style={styles.inputGroup}>
               <Text style={styles.label}>Your Name</Text>
               <TextInput
                 style={styles.input}
-                placeholder="Enter your name"
+                placeholder="What should I call you?"
                 placeholderTextColor="#6b7280"
                 value={formData.name}
                 onChangeText={(text) => setFormData(prev => ({ ...prev, name: text }))}
@@ -192,10 +174,10 @@ export default function Onboarding() {
             </View>
             
             <View style={styles.inputGroup}>
-              <Text style={styles.label}>Your Age</Text>
+              <Text style={styles.label}>Age</Text>
               <TextInput
                 style={styles.input}
-                placeholder="Enter your age"
+                placeholder="Your age"
                 placeholderTextColor="#6b7280"
                 keyboardType="numeric"
                 value={formData.age}
@@ -205,17 +187,17 @@ export default function Onboarding() {
           </View>
         );
       
-      case 'career':
+      case 'situation':
         return (
           <View style={styles.stepContainer}>
-            <Text style={styles.stepTitle}>Career Transition</Text>
-            <Text style={styles.stepSubtitle}>Where are you now and where do you want to be?</Text>
+            <Text style={styles.stepTitle}>Where are you now?</Text>
+            <Text style={styles.stepSubtitle}>And where do you want to be?</Text>
             
             <View style={styles.inputGroup}>
-              <Text style={styles.label}>Current Role / Situation</Text>
+              <Text style={styles.label}>Current Situation / Role</Text>
               <TextInput
                 style={styles.input}
-                placeholder="e.g., Software Developer"
+                placeholder="e.g., Software Developer, Student, Unemployed"
                 placeholderTextColor="#6b7280"
                 value={formData.current_role}
                 onChangeText={(text) => setFormData(prev => ({ ...prev, current_role: text }))}
@@ -223,10 +205,10 @@ export default function Onboarding() {
             </View>
             
             <View style={styles.inputGroup}>
-              <Text style={styles.label}>Goal Role / Where You Want to Be</Text>
+              <Text style={styles.label}>Goal - Where You Want to Be</Text>
               <TextInput
                 style={styles.input}
-                placeholder="e.g., Project Manager"
+                placeholder="e.g., Project Manager, Fit & Healthy, Business Owner"
                 placeholderTextColor="#6b7280"
                 value={formData.goal_role}
                 onChangeText={(text) => setFormData(prev => ({ ...prev, goal_role: text }))}
@@ -235,11 +217,37 @@ export default function Onboarding() {
           </View>
         );
       
+      case 'struggles':
+        return (
+          <View style={styles.stepContainer}>
+            <Text style={styles.stepTitle}>What's holding you back?</Text>
+            <Text style={styles.stepSubtitle}>Be honest. Select ALL that apply.</Text>
+            
+            <View style={styles.chipsContainer}>
+              {COMMON_STRUGGLES.map((item) => (
+                <TouchableOpacity
+                  key={item}
+                  style={[
+                    styles.chip,
+                    formData.daily_challenges.includes(item) && styles.chipSelectedRed
+                  ]}
+                  onPress={() => toggleItem(formData.daily_challenges, item, 'daily_challenges')}
+                >
+                  <Text style={[
+                    styles.chipText,
+                    formData.daily_challenges.includes(item) && styles.chipTextSelected
+                  ]}>{item}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        );
+      
       case 'routine':
         return (
           <View style={styles.stepContainer}>
-            <Text style={styles.stepTitle}>Daily Routine</Text>
-            <Text style={styles.stepSubtitle}>Set your ideal daily schedule</Text>
+            <Text style={styles.stepTitle}>Your Ideal Day</Text>
+            <Text style={styles.stepSubtitle}>When should your day start and end?</Text>
             
             <View style={styles.timeRow}>
               <View style={styles.timeInput}>
@@ -253,7 +261,7 @@ export default function Onboarding() {
                 />
               </View>
               <View style={styles.timeInput}>
-                <Text style={styles.label}>Sleep Time</Text>
+                <Text style={styles.label}>Sleep</Text>
                 <TextInput
                   style={styles.input}
                   placeholder="22:00"
@@ -286,141 +294,67 @@ export default function Onboarding() {
                 />
               </View>
             </View>
+
+            <View style={styles.inputGroup}>
+              <Text style={styles.label}>Preferred Gym/Exercise Time</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="e.g., 07:00 or evening"
+                placeholderTextColor="#6b7280"
+                value={formData.preferred_gym_time}
+                onChangeText={(text) => setFormData(prev => ({ ...prev, preferred_gym_time: text }))}
+              />
+            </View>
           </View>
         );
       
-      case 'habits_build':
+      case 'habits':
         return (
           <View style={styles.stepContainer}>
             <Text style={styles.stepTitle}>Habits to Build</Text>
-            <Text style={styles.stepSubtitle}>Select habits you want to develop</Text>
+            <Text style={styles.stepSubtitle}>What good habits do you want?</Text>
             
             <View style={styles.chipsContainer}>
-              {COMMON_HABITS_BUILD.map((habit) => (
+              {GOOD_HABITS.map((item) => (
                 <TouchableOpacity
-                  key={habit}
+                  key={item}
                   style={[
                     styles.chip,
-                    formData.habits_to_build.includes(habit) && styles.chipSelected
+                    formData.habits_to_build.includes(item) && styles.chipSelected
                   ]}
-                  onPress={() => toggleHabitBuild(habit)}
+                  onPress={() => toggleItem(formData.habits_to_build, item, 'habits_to_build')}
                 >
                   <Text style={[
                     styles.chipText,
-                    formData.habits_to_build.includes(habit) && styles.chipTextSelected
-                  ]}>{habit}</Text>
+                    formData.habits_to_build.includes(item) && styles.chipTextSelected
+                  ]}>{item}</Text>
                 </TouchableOpacity>
               ))}
             </View>
           </View>
         );
       
-      case 'habits_quit':
+      case 'ready':
         return (
           <View style={styles.stepContainer}>
-            <Text style={styles.stepTitle}>Habits to Quit</Text>
-            <Text style={styles.stepSubtitle}>Select habits you want to overcome</Text>
-            
-            <View style={styles.chipsContainer}>
-              {COMMON_HABITS_QUIT.map((habit) => (
-                <TouchableOpacity
-                  key={habit}
-                  style={[
-                    styles.chip,
-                    formData.habits_to_quit.includes(habit) && styles.chipSelectedRed
-                  ]}
-                  onPress={() => toggleHabitQuit(habit)}
-                >
-                  <Text style={[
-                    styles.chipText,
-                    formData.habits_to_quit.includes(habit) && styles.chipTextSelected
-                  ]}>{habit}</Text>
-                </TouchableOpacity>
-              ))}
+            <View style={styles.rikAvatar}>
+              <Ionicons name="checkmark-circle" size={80} color="#10b981" />
             </View>
-          </View>
-        );
-      
-      case 'goals':
-        return (
-          <View style={styles.stepContainer}>
-            <Text style={styles.stepTitle}>Your Goals</Text>
-            <Text style={styles.stepSubtitle}>What do you want to achieve?</Text>
-            
-            <View style={styles.inputRow}>
-              <TextInput
-                style={[styles.input, { flex: 1 }]}
-                placeholder="Add a goal..."
-                placeholderTextColor="#6b7280"
-                value={customGoal}
-                onChangeText={setCustomGoal}
-                onSubmitEditing={addCustomGoal}
-              />
-              <TouchableOpacity style={styles.addButton} onPress={addCustomGoal}>
-                <Ionicons name="add" size={24} color="#fff" />
-              </TouchableOpacity>
+            <Text style={styles.title}>Ready, {formData.name}?</Text>
+            <Text style={styles.subtitle}>
+              From now on, I control your schedule. I'll tell you what to do and when.
+              No more guessing. No more wasting time.
+            </Text>
+            <View style={styles.summaryCard}>
+              <Text style={styles.summaryTitle}>Your Mission:</Text>
+              <Text style={styles.summaryText}>
+                {formData.current_role} → {formData.goal_role}
+              </Text>
+              <Text style={styles.summaryTitle}>Challenges to Overcome:</Text>
+              <Text style={styles.summaryText}>
+                {formData.daily_challenges.join(', ') || 'None selected'}
+              </Text>
             </View>
-            
-            <View style={styles.goalsContainer}>
-              {formData.goals.map((goal, index) => (
-                <View key={index} style={styles.goalItem}>
-                  <Text style={styles.goalText}>{goal}</Text>
-                  <TouchableOpacity onPress={() => removeGoal(goal)}>
-                    <Ionicons name="close-circle" size={20} color="#ef4444" />
-                  </TouchableOpacity>
-                </View>
-              ))}
-            </View>
-          </View>
-        );
-      
-      case 'assistant_mode':
-        return (
-          <View style={styles.stepContainer}>
-            <Text style={styles.stepTitle}>Assistant Personality</Text>
-            <Text style={styles.stepSubtitle}>How do you want your AI coach to interact with you?</Text>
-            
-            <TouchableOpacity
-              style={[
-                styles.modeCard,
-                formData.assistant_mode === 'strict' && styles.modeCardSelected
-              ]}
-              onPress={() => setFormData(prev => ({ ...prev, assistant_mode: 'strict' }))}
-            >
-              <Ionicons name="fitness" size={32} color={formData.assistant_mode === 'strict' ? '#ef4444' : '#6b7280'} />
-              <View style={styles.modeContent}>
-                <Text style={styles.modeTitle}>Strict</Text>
-                <Text style={styles.modeDescription}>No excuses. Direct and firm. Holds you fully accountable.</Text>
-              </View>
-            </TouchableOpacity>
-            
-            <TouchableOpacity
-              style={[
-                styles.modeCard,
-                formData.assistant_mode === 'moderate' && styles.modeCardSelected
-              ]}
-              onPress={() => setFormData(prev => ({ ...prev, assistant_mode: 'moderate' }))}
-            >
-              <Ionicons name="scale" size={32} color={formData.assistant_mode === 'moderate' ? '#f59e0b' : '#6b7280'} />
-              <View style={styles.modeContent}>
-                <Text style={styles.modeTitle}>Moderate</Text>
-                <Text style={styles.modeDescription}>Balanced approach. Supportive but challenging.</Text>
-              </View>
-            </TouchableOpacity>
-            
-            <TouchableOpacity
-              style={[
-                styles.modeCard,
-                formData.assistant_mode === 'casual' && styles.modeCardSelected
-              ]}
-              onPress={() => setFormData(prev => ({ ...prev, assistant_mode: 'casual' }))}
-            >
-              <Ionicons name="heart" size={32} color={formData.assistant_mode === 'casual' ? '#10b981' : '#6b7280'} />
-              <View style={styles.modeContent}>
-                <Text style={styles.modeTitle}>Casual</Text>
-                <Text style={styles.modeDescription}>Friendly and gentle. Focus on positive reinforcement.</Text>
-              </View>
-            </TouchableOpacity>
           </View>
         );
       
@@ -433,8 +367,10 @@ export default function Onboarding() {
     switch (STEPS[currentStep]) {
       case 'basics':
         return formData.name.trim() && formData.age;
-      case 'career':
+      case 'situation':
         return formData.current_role.trim() && formData.goal_role.trim();
+      case 'struggles':
+        return formData.daily_challenges.length > 0;
       default:
         return true;
     }
@@ -446,44 +382,25 @@ export default function Onboarding() {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.keyboardView}
       >
-        {/* Progress Bar */}
         <View style={styles.progressContainer}>
           <View style={styles.progressBar}>
-            <View
-              style={[
-                styles.progressFill,
-                { width: `${((currentStep + 1) / STEPS.length) * 100}%` }
-              ]}
-            />
+            <View style={[styles.progressFill, { width: `${((currentStep + 1) / STEPS.length) * 100}%` }]} />
           </View>
-          <Text style={styles.progressText}>
-            {currentStep + 1} of {STEPS.length}
-          </Text>
         </View>
 
-        <ScrollView
-          style={styles.scrollView}
-          contentContainerStyle={styles.scrollContent}
-          showsVerticalScrollIndicator={false}
-        >
+        <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
           {renderStep()}
         </ScrollView>
 
-        {/* Navigation Buttons */}
         <View style={styles.buttonContainer}>
           {currentStep > 0 && (
             <TouchableOpacity style={styles.backButton} onPress={handleBack}>
               <Ionicons name="arrow-back" size={20} color="#fff" />
-              <Text style={styles.backButtonText}>Back</Text>
             </TouchableOpacity>
           )}
           
           <TouchableOpacity
-            style={[
-              styles.nextButton,
-              !canProceed() && styles.buttonDisabled,
-              currentStep === 0 && styles.fullWidthButton
-            ]}
+            style={[styles.nextButton, !canProceed() && styles.buttonDisabled]}
             onPress={handleNext}
             disabled={!canProceed() || isLoading}
           >
@@ -492,7 +409,7 @@ export default function Onboarding() {
             ) : (
               <>
                 <Text style={styles.nextButtonText}>
-                  {currentStep === STEPS.length - 1 ? 'Get Started' : 'Continue'}
+                  {currentStep === STEPS.length - 1 ? "Let's Go" : 'Continue'}
                 </Text>
                 <Ionicons name="arrow-forward" size={20} color="#fff" />
               </>
@@ -505,241 +422,57 @@ export default function Onboarding() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0a0a0f',
+  container: { flex: 1, backgroundColor: '#0a0a0f' },
+  keyboardView: { flex: 1 },
+  progressContainer: { paddingHorizontal: 20, paddingTop: 16 },
+  progressBar: { height: 4, backgroundColor: '#1f2937', borderRadius: 2 },
+  progressFill: { height: '100%', backgroundColor: '#6366f1', borderRadius: 2 },
+  scrollView: { flex: 1 },
+  scrollContent: { padding: 20, paddingBottom: 40 },
+  stepContainer: { alignItems: 'center' },
+  rikAvatar: {
+    width: 120, height: 120, borderRadius: 60, backgroundColor: '#1f2937',
+    alignItems: 'center', justifyContent: 'center', marginBottom: 24,
   },
-  keyboardView: {
-    flex: 1,
-  },
-  progressContainer: {
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  progressBar: {
-    flex: 1,
-    height: 4,
-    backgroundColor: '#1f2937',
-    borderRadius: 2,
-  },
-  progressFill: {
-    height: '100%',
-    backgroundColor: '#6366f1',
-    borderRadius: 2,
-  },
-  progressText: {
-    color: '#6b7280',
-    fontSize: 12,
-  },
-  scrollView: {
-    flex: 1,
-  },
-  scrollContent: {
-    padding: 20,
-    paddingBottom: 40,
-  },
-  stepContainer: {
-    alignItems: 'center',
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#fff',
-    textAlign: 'center',
-    marginTop: 24,
-  },
-  subtitle: {
-    fontSize: 16,
-    color: '#9ca3af',
-    textAlign: 'center',
-    marginTop: 12,
-    lineHeight: 24,
-  },
-  featureList: {
-    marginTop: 32,
-    width: '100%',
-  },
-  featureItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingVertical: 12,
-  },
-  featureText: {
-    color: '#e5e7eb',
-    fontSize: 16,
-  },
-  stepTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#fff',
-    textAlign: 'center',
-  },
-  stepSubtitle: {
-    fontSize: 14,
-    color: '#9ca3af',
-    textAlign: 'center',
-    marginTop: 8,
-    marginBottom: 32,
-  },
-  inputGroup: {
-    width: '100%',
-    marginBottom: 20,
-  },
-  label: {
-    color: '#e5e7eb',
-    fontSize: 14,
-    marginBottom: 8,
-    fontWeight: '500',
-  },
+  title: { fontSize: 32, fontWeight: 'bold', color: '#fff', textAlign: 'center' },
+  subtitle: { fontSize: 16, color: '#9ca3af', textAlign: 'center', marginTop: 12, lineHeight: 24 },
+  featureList: { marginTop: 32, width: '100%' },
+  featureItem: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12 },
+  featureText: { color: '#e5e7eb', fontSize: 16 },
+  stepTitle: { fontSize: 26, fontWeight: 'bold', color: '#fff', textAlign: 'center' },
+  stepSubtitle: { fontSize: 14, color: '#9ca3af', textAlign: 'center', marginTop: 8, marginBottom: 32 },
+  inputGroup: { width: '100%', marginBottom: 20 },
+  label: { color: '#e5e7eb', fontSize: 14, marginBottom: 8, fontWeight: '500' },
   input: {
-    backgroundColor: '#1f2937',
-    borderRadius: 12,
-    padding: 16,
-    color: '#fff',
-    fontSize: 16,
-    borderWidth: 1,
-    borderColor: '#374151',
+    backgroundColor: '#1f2937', borderRadius: 12, padding: 16,
+    color: '#fff', fontSize: 16, borderWidth: 1, borderColor: '#374151',
   },
-  timeRow: {
-    flexDirection: 'row',
-    gap: 16,
-    width: '100%',
-    marginBottom: 16,
-  },
-  timeInput: {
-    flex: 1,
-  },
-  chipsContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-    width: '100%',
-  },
+  timeRow: { flexDirection: 'row', gap: 16, width: '100%', marginBottom: 16 },
+  timeInput: { flex: 1 },
+  chipsContainer: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, width: '100%' },
   chip: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-    backgroundColor: '#1f2937',
-    borderWidth: 1,
-    borderColor: '#374151',
+    paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20,
+    backgroundColor: '#1f2937', borderWidth: 1, borderColor: '#374151',
   },
-  chipSelected: {
-    backgroundColor: '#6366f1',
-    borderColor: '#6366f1',
+  chipSelected: { backgroundColor: '#6366f1', borderColor: '#6366f1' },
+  chipSelectedRed: { backgroundColor: '#ef4444', borderColor: '#ef4444' },
+  chipText: { color: '#9ca3af', fontSize: 14 },
+  chipTextSelected: { color: '#fff' },
+  summaryCard: {
+    backgroundColor: '#1f2937', borderRadius: 16, padding: 20,
+    width: '100%', marginTop: 24,
   },
-  chipSelectedRed: {
-    backgroundColor: '#ef4444',
-    borderColor: '#ef4444',
-  },
-  chipText: {
-    color: '#9ca3af',
-    fontSize: 14,
-  },
-  chipTextSelected: {
-    color: '#fff',
-  },
-  inputRow: {
-    flexDirection: 'row',
-    gap: 12,
-    width: '100%',
-    marginBottom: 20,
-  },
-  addButton: {
-    backgroundColor: '#6366f1',
-    borderRadius: 12,
-    width: 52,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  goalsContainer: {
-    width: '100%',
-  },
-  goalItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: '#1f2937',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 10,
-  },
-  goalText: {
-    color: '#fff',
-    fontSize: 16,
-    flex: 1,
-  },
-  modeCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 16,
-    width: '100%',
-    backgroundColor: '#1f2937',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 12,
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  modeCardSelected: {
-    borderColor: '#6366f1',
-  },
-  modeContent: {
-    flex: 1,
-  },
-  modeTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
-  },
-  modeDescription: {
-    color: '#9ca3af',
-    fontSize: 14,
-    marginTop: 4,
-  },
-  buttonContainer: {
-    flexDirection: 'row',
-    padding: 20,
-    gap: 12,
-  },
+  summaryTitle: { color: '#6b7280', fontSize: 12, fontWeight: '600', textTransform: 'uppercase', marginTop: 12 },
+  summaryText: { color: '#fff', fontSize: 16, marginTop: 4 },
+  buttonContainer: { flexDirection: 'row', padding: 20, gap: 12 },
   backButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 16,
-    paddingHorizontal: 24,
-    borderRadius: 12,
-    backgroundColor: '#1f2937',
-  },
-  backButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
+    width: 56, height: 56, borderRadius: 28, backgroundColor: '#1f2937',
+    alignItems: 'center', justifyContent: 'center',
   },
   nextButton: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 16,
-    paddingHorizontal: 24,
-    borderRadius: 12,
-    backgroundColor: '#6366f1',
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8, paddingVertical: 16, borderRadius: 12, backgroundColor: '#6366f1',
   },
-  fullWidthButton: {
-    flex: 1,
-  },
-  buttonDisabled: {
-    backgroundColor: '#374151',
-  },
-  nextButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
+  buttonDisabled: { backgroundColor: '#374151' },
+  nextButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
 });
