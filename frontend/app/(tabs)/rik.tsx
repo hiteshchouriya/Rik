@@ -568,6 +568,7 @@ const styles = StyleSheet.create({
     borderWidth: 3, borderColor: '#6366f1',
   },
   rikLabel: { color: '#fff', fontSize: 18, fontWeight: '600', marginTop: 20 },
+  rikHint: { color: '#6b7280', fontSize: 13, marginTop: 6, textAlign: 'center' },
   quickActions: {
     flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center',
     gap: 10, marginTop: 32, paddingHorizontal: 10,
