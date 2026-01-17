@@ -10,11 +10,11 @@ from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime, timedelta
 from emergentintegrations.llm.chat import LlmChat, UserMessage
+import json
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
@@ -41,13 +41,18 @@ class UserProfile(BaseModel):
     habits_to_build: List[str] = []
     habits_to_quit: List[str] = []
     goals: List[str] = []
-    daily_challenges: List[str] = []  # What user struggles with
+    daily_challenges: List[str] = []
+    actual_routine: str = ""  # User's real routine description
     preferred_gym_time: str = ""
-    commute_method: str = ""  # bus, car, walk, etc.
+    commute_method: str = ""
     location_home: Optional[Dict] = None
     location_work: Optional[Dict] = None
     location_gym: Optional[Dict] = None
+    points: int = 0  # Gamification points
+    streak_days: int = 0
+    last_active_date: str = ""
     onboarding_completed: bool = False
+    routine_learned: bool = False  # Has Rik learned their routine?
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -65,6 +70,7 @@ class UserProfileCreate(BaseModel):
     habits_to_quit: List[str] = []
     goals: List[str] = []
     daily_challenges: List[str] = []
+    actual_routine: str = ""
     preferred_gym_time: str = ""
     commute_method: str = ""
 
@@ -76,7 +82,7 @@ class ScheduleItem(BaseModel):
     title: str
     description: str
     duration_minutes: int
-    category: str  # wake, exercise, work, meal, learning, break, sleep
+    category: str
     completed: bool = False
     ai_generated: bool = True
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -99,31 +105,28 @@ class HabitLogCreate(BaseModel):
     date: str
     notes: Optional[str] = None
 
-class LocationLog(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    user_id: str
-    latitude: float
-    longitude: float
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-    location_type: Optional[str] = None  # home, work, gym, other
-
 class ChatMessage(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
     role: str
     content: str
-    is_voice: bool = False
+    message_type: str = "chat"  # chat, routine_learning, schedule_planning, checkin
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
-class VoiceCommand(BaseModel):
+class RikConversation(BaseModel):
     user_id: str
-    command: str
-    context: Optional[str] = None
+    message: str
+    context: str = "general"  # general, learning_routine, planning_day, checkin, motivation
 
 class DailyPlanRequest(BaseModel):
     user_id: str
     date: str
-    user_input: Optional[str] = None  # What user wants to do today
+    user_preferences: Optional[str] = None
+
+class CheckInResponse(BaseModel):
+    user_id: str
+    task_id: str
+    response: str  # yes, no, partial, skip
 
 class DailyAnalysis(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -134,13 +137,23 @@ class DailyAnalysis(BaseModel):
     improvements: List[str] = []
     recommendations: List[str] = []
     overall_score: int = 0
+    points_earned: int = 0
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class InsightData(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    insight_type: str  # pattern, achievement, warning, tip
+    title: str
+    description: str
+    data: Dict = {}
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 # ==================== USER ENDPOINTS ====================
 
 @api_router.get("/")
 async def root():
-    return {"message": "Rik - Your AI Life Coach API"}
+    return {"message": "Rik - Your AI Life Coach API v2"}
 
 @api_router.post("/users", response_model=UserProfile)
 async def create_user(user_data: UserProfileCreate):
@@ -156,31 +169,248 @@ async def get_user(user_id: str):
         raise HTTPException(status_code=404, detail="User not found")
     return UserProfile(**user)
 
-@api_router.put("/users/{user_id}", response_model=UserProfile)
-async def update_user(user_id: str, user_data: UserProfileCreate):
-    user = await db.users.find_one({"id": user_id})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    update_data = user_data.model_dump()
-    update_data["updated_at"] = datetime.utcnow()
-    await db.users.update_one({"id": user_id}, {"$set": update_data})
-    updated_user = await db.users.find_one({"id": user_id})
-    return UserProfile(**updated_user)
-
-@api_router.put("/users/{user_id}/location")
-async def update_user_location(user_id: str, location_type: str, latitude: float, longitude: float):
-    location_field = f"location_{location_type}"
-    await db.users.update_one(
-        {"id": user_id},
-        {"$set": {location_field: {"lat": latitude, "lng": longitude}}}
-    )
+@api_router.put("/users/{user_id}")
+async def update_user(user_id: str, updates: Dict):
+    updates["updated_at"] = datetime.utcnow()
+    await db.users.update_one({"id": user_id}, {"$set": updates})
     return {"status": "updated"}
 
-# ==================== SMART SCHEDULE GENERATION ====================
+@api_router.put("/users/{user_id}/routine")
+async def save_user_routine(user_id: str, routine: str):
+    """Save user's actual daily routine after Rik learns it"""
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"actual_routine": routine, "routine_learned": True, "updated_at": datetime.utcnow()}}
+    )
+    return {"status": "routine_saved"}
 
-@api_router.post("/schedule/generate")
-async def generate_daily_schedule(request: DailyPlanRequest):
-    """AI generates your entire day schedule based on your profile and what you want to achieve"""
+@api_router.post("/users/{user_id}/add-points")
+async def add_points(user_id: str, points: int):
+    """Add gamification points"""
+    await db.users.update_one({"id": user_id}, {"$inc": {"points": points}})
+    user = await db.users.find_one({"id": user_id})
+    return {"total_points": user.get("points", 0)}
+
+# ==================== RIK INTELLIGENT CONVERSATION ====================
+
+@api_router.post("/rik/chat")
+async def rik_intelligent_chat(request: RikConversation):
+    """Main Rik conversation endpoint - context-aware responses"""
+    try:
+        user = await db.users.find_one({"id": request.user_id})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user_profile = UserProfile(**user)
+        today = datetime.now().strftime("%Y-%m-%d")
+        current_time = datetime.now().strftime("%H:%M")
+        current_hour = datetime.now().hour
+        
+        # Get context data
+        schedule = await db.schedules.find({"user_id": request.user_id, "date": today}).sort("time", 1).to_list(100)
+        habits = await db.habit_logs.find({"user_id": request.user_id, "date": today}).to_list(100)
+        recent_chats = await db.chat_messages.find({"user_id": request.user_id}).sort("created_at", -1).to_list(10)
+        recent_chats.reverse()
+        
+        # Build conversation history
+        chat_history = "\n".join([f"{'User' if c['role']=='user' else 'Rik'}: {c['content']}" for c in recent_chats[-6:]])
+        
+        # Build context-specific system prompt
+        if request.context == "learning_routine":
+            system_prompt = f"""
+You are Rik, learning about {user_profile.name}'s actual daily routine.
+
+Your goal: Understand their REAL day - what they actually do, not what they wish they did.
+
+Ask about:
+1. What time do they ACTUALLY wake up (not ideally)?
+2. What's the first thing they do? (Phone? Coffee? Exercise?)
+3. When do they start work? How does work day look?
+4. When do they eat meals? What do they eat?
+5. What time do they ACTUALLY sleep?
+6. What activities eat up their time? (Social media, YouTube, etc.)
+7. When do they feel most productive vs most distracted?
+
+Be conversational, ask ONE question at a time. Don't lecture.
+After gathering enough info (4-5 exchanges), summarize their routine.
+
+Previous conversation:
+{chat_history}
+
+User's latest message: {request.message}
+"""
+        elif request.context == "planning_day":
+            system_prompt = f"""
+You are Rik, helping {user_profile.name} plan their day.
+
+Their profile:
+- Current: {user_profile.current_role} → Goal: {user_profile.goal_role}
+- Usual wake: {user_profile.wake_time}, sleep: {user_profile.sleep_time}
+- Work: {user_profile.work_start} - {user_profile.work_end}
+- Habits building: {', '.join(user_profile.habits_to_build)}
+- Struggles: {', '.join(user_profile.daily_challenges)}
+- Their actual routine: {user_profile.actual_routine or 'Not yet learned'}
+
+Ask them:
+1. Any fixed appointments/meetings today?
+2. What's the ONE thing they MUST accomplish today?
+3. How are they feeling - energy level?
+4. Any challenges they're anticipating?
+
+After 2-3 exchanges, you'll have enough to generate their schedule.
+When ready, say: "Got it. Let me create your schedule. Say 'generate schedule' when ready."
+
+Previous conversation:
+{chat_history}
+"""
+        elif request.context == "checkin":
+            # Find current/upcoming task
+            upcoming = [s for s in schedule if s['time'] >= current_time and not s['completed']]
+            current_task = upcoming[0] if upcoming else None
+            
+            system_prompt = f"""
+You are Rik doing a check-in with {user_profile.name}.
+
+Current time: {current_time}
+Current/Next task: {current_task['title'] if current_task else 'None scheduled'}
+
+Schedule completion: {len([s for s in schedule if s['completed']])}/{len(schedule)}
+Habits done: {len([h for h in habits if h['completed']])}
+
+Your job:
+1. Check if they're on track
+2. If behind, understand why (no judgment initially)
+3. Help them get back on track with specific next action
+4. Be direct but supportive
+
+Keep responses SHORT (under 40 words).
+"""
+        else:  # general
+            system_prompt = f"""
+You are Rik, a strict but caring AI life coach for {user_profile.name}.
+
+Profile:
+- {user_profile.age} years old, {user_profile.current_role} → {user_profile.goal_role}
+- Challenges: {', '.join(user_profile.daily_challenges) or 'None specified'}
+- Mode: {user_profile.assistant_mode}
+- Points earned: {user_profile.points}
+- Streak: {user_profile.streak_days} days
+
+Current time: {current_time}
+Today's schedule: {len(schedule)} tasks, {len([s for s in schedule if s['completed']])} done
+Routine learned: {'Yes' if user_profile.routine_learned else 'No - you should learn it first!'}
+
+Rules:
+1. Keep responses SHORT (under 50 words) - you're voice-friendly
+2. Be direct, no fluff
+3. Give ONE clear action or question
+4. If they haven't told you their routine yet, ask to learn it first
+5. Use their name occasionally
+6. If it's morning, give morning briefing
+7. If it's evening, prompt for daily review
+
+Previous conversation:
+{chat_history}
+"""
+        
+        api_key = os.environ.get('EMERGENT_LLM_KEY')
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"rik_{request.user_id}_{request.context}",
+            system_message=system_prompt
+        ).with_model("openai", "gpt-5.2")
+        
+        user_message = UserMessage(text=request.message)
+        response = await chat.send_message(user_message)
+        
+        # Determine response type for frontend
+        response_type = "chat"
+        action_required = None
+        
+        if "generate schedule" in response.lower() or "create your schedule" in response.lower():
+            response_type = "ready_to_generate"
+            action_required = "generate_schedule"
+        elif "learn" in response.lower() and "routine" in response.lower() and not user_profile.routine_learned:
+            response_type = "suggest_learning"
+            action_required = "learn_routine"
+        
+        # Save messages
+        user_msg = ChatMessage(user_id=request.user_id, role="user", content=request.message, message_type=request.context)
+        rik_msg = ChatMessage(user_id=request.user_id, role="assistant", content=response, message_type=request.context)
+        await db.chat_messages.insert_one(user_msg.model_dump())
+        await db.chat_messages.insert_one(rik_msg.model_dump())
+        
+        return {
+            "response": response,
+            "response_type": response_type,
+            "action_required": action_required,
+            "context": request.context,
+            "routine_learned": user_profile.routine_learned
+        }
+        
+    except Exception as e:
+        logger.error(f"Rik chat error: {str(e)}")
+        return {"response": "Sorry, I couldn't process that. Try again?", "error": str(e)}
+
+@api_router.post("/rik/learn-routine")
+async def learn_routine_from_conversation(user_id: str):
+    """Extract and save routine from conversation history"""
+    try:
+        user = await db.users.find_one({"id": user_id})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get learning conversation
+        chats = await db.chat_messages.find({
+            "user_id": user_id,
+            "message_type": "learning_routine"
+        }).sort("created_at", -1).to_list(20)
+        
+        conversation = "\n".join([f"{'User' if c['role']=='user' else 'Rik'}: {c['content']}" for c in reversed(chats)])
+        
+        prompt = f"""
+From this conversation, extract the user's actual daily routine.
+
+Conversation:
+{conversation}
+
+Return a structured summary in this format:
+"Wake: [time] - [what they do]
+Morning: [activities]
+Work: [hours and type]
+Breaks: [what they do]
+Evening: [activities]
+Sleep: [time]
+Distractions: [what wastes their time]
+Best productive time: [when]"
+
+Be factual, use what they actually said.
+"""
+        
+        api_key = os.environ.get('EMERGENT_LLM_KEY')
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"routine_extract_{user_id}",
+            system_message="Extract routine information accurately."
+        ).with_model("openai", "gpt-5.2")
+        
+        response = await chat.send_message(UserMessage(text=prompt))
+        
+        # Save routine
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {"actual_routine": response, "routine_learned": True}}
+        )
+        
+        return {"routine": response, "saved": True}
+        
+    except Exception as e:
+        logger.error(f"Learn routine error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/rik/generate-smart-schedule")
+async def generate_smart_schedule(request: DailyPlanRequest):
+    """Generate schedule based on learned routine + today's preferences"""
     try:
         user = await db.users.find_one({"id": request.user_id})
         if not user:
@@ -188,80 +418,76 @@ async def generate_daily_schedule(request: DailyPlanRequest):
         
         user_profile = UserProfile(**user)
         
-        # Get existing habits and goals
-        habits_build = ", ".join(user_profile.habits_to_build) if user_profile.habits_to_build else "None set"
-        habits_quit = ", ".join(user_profile.habits_to_quit) if user_profile.habits_to_quit else "None set"
-        goals = ", ".join(user_profile.goals) if user_profile.goals else "None set"
-        challenges = ", ".join(user_profile.daily_challenges) if user_profile.daily_challenges else "None mentioned"
+        # Get recent planning conversation for today's preferences
+        recent_planning = await db.chat_messages.find({
+            "user_id": request.user_id,
+            "message_type": "planning_day"
+        }).sort("created_at", -1).to_list(10)
+        
+        planning_context = "\n".join([f"{'User' if c['role']=='user' else 'Rik'}: {c['content']}" for c in reversed(recent_planning)])
         
         prompt = f"""
-You are Rik, a strict AI life coach. Generate a detailed daily schedule for {user_profile.name}.
+Create a realistic daily schedule for {user_profile.name}.
 
-USER PROFILE:
-- Age: {user_profile.age}
-- Current: {user_profile.current_role} → Goal: {user_profile.goal_role}
-- Wake time: {user_profile.wake_time}, Sleep time: {user_profile.sleep_time}
-- Work hours: {user_profile.work_start} - {user_profile.work_end}
-- Gym time preference: {user_profile.preferred_gym_time or 'flexible'}
-- Commute method: {user_profile.commute_method or 'not specified'}
+PROFILE:
+- Goal: {user_profile.current_role} → {user_profile.goal_role}
+- Wake: {user_profile.wake_time}, Sleep: {user_profile.sleep_time}
+- Work: {user_profile.work_start} - {user_profile.work_end}
+- Gym preference: {user_profile.preferred_gym_time or 'flexible'}
 
-HABITS TO BUILD: {habits_build}
-HABITS TO QUIT: {habits_quit}
-GOALS: {goals}
-DAILY CHALLENGES/STRUGGLES: {challenges}
+THEIR ACTUAL ROUTINE (what they really do):
+{user_profile.actual_routine or 'Not learned yet - use defaults'}
 
-USER'S INPUT FOR TODAY: {request.user_input or 'No specific requests - create optimal day'}
+HABITS TO BUILD: {', '.join(user_profile.habits_to_build)}
+CHALLENGES: {', '.join(user_profile.daily_challenges)}
 
-Generate a strict, time-blocked schedule from wake to sleep. Include:
-1. Morning routine (wake up, exercise, breakfast)
-2. Work blocks with breaks
-3. Skill development time for their goal transition
-4. Meals and hydration reminders
-5. Evening wind-down and reflection
+TODAY'S PLANNING CONVERSATION:
+{planning_context or 'No specific requests'}
 
-Be STRICT - no wasted time. Account for their struggles.
+USER'S ADDITIONAL INPUT: {request.user_preferences or 'None'}
 
-Return ONLY a JSON array with this exact format (no markdown, no explanation):
+RULES:
+1. Be REALISTIC - account for their actual habits, not ideal ones
+2. Build in buffer time for their known distractions
+3. Put important tasks during their productive hours
+4. Include specific times for habit-building activities
+5. Add breaks (they need them)
+6. Include meal times
+7. End with evening wind-down
+
+Return ONLY a JSON array:
 [
-  {{"time": "06:00", "title": "Wake Up", "description": "Get out of bed immediately. No snoozing.", "duration_minutes": 5, "category": "wake"}},
-  {{"time": "06:05", "title": "Hydration", "description": "Drink 500ml water before anything else.", "duration_minutes": 5, "category": "health"}}
+  {{"time": "06:00", "title": "Wake Up", "description": "Specific instruction", "duration_minutes": 5, "category": "wake"}},
+  ...
 ]
 
-Categories: wake, exercise, work, meal, learning, break, health, sleep
+Categories: wake, exercise, work, meal, learning, break, health, sleep, focus
 """
         
         api_key = os.environ.get('EMERGENT_LLM_KEY')
-        if not api_key:
-            raise HTTPException(status_code=500, detail="AI service not configured")
-        
         chat = LlmChat(
             api_key=api_key,
             session_id=f"schedule_{request.user_id}_{request.date}",
-            system_message="You are Rik, a strict AI life coach. Return only valid JSON arrays."
+            system_message="Generate realistic schedules. Return only valid JSON arrays."
         ).with_model("openai", "gpt-5.2")
         
-        user_message = UserMessage(text=prompt)
-        response = await chat.send_message(user_message)
+        response = await chat.send_message(UserMessage(text=prompt))
         
-        # Parse JSON response
-        import json
+        # Parse JSON
         clean_response = response.strip()
         if clean_response.startswith("```"):
             clean_response = clean_response.split("```")[1]
             if clean_response.startswith("json"):
                 clean_response = clean_response[4:]
-        clean_response = clean_response.strip()
         
         try:
-            schedule_items = json.loads(clean_response)
+            schedule_items = json.loads(clean_response.strip())
         except:
-            # Fallback schedule
             schedule_items = [
-                {"time": user_profile.wake_time, "title": "Wake Up", "description": "Start your day strong!", "duration_minutes": 5, "category": "wake"},
-                {"time": "07:00", "title": "Exercise", "description": "30 min workout", "duration_minutes": 30, "category": "exercise"},
+                {"time": user_profile.wake_time, "title": "Wake Up", "description": "Start your day", "duration_minutes": 5, "category": "wake"}
             ]
         
-        # Save to database
+        # Clear old schedule and save new
         await db.schedules.delete_many({"user_id": request.user_id, "date": request.date})
         
         saved_items = []
@@ -279,11 +505,147 @@ Categories: wake, exercise, work, meal, learning, break, health, sleep
             await db.schedules.insert_one(schedule_item.model_dump())
             saved_items.append(schedule_item.model_dump())
         
-        return {"schedule": saved_items, "message": f"Your day is planned, {user_profile.name}. Let's crush it!"}
+        return {
+            "schedule": saved_items,
+            "count": len(saved_items),
+            "message": f"Schedule ready with {len(saved_items)} tasks. Let's execute!"
+        }
         
     except Exception as e:
         logger.error(f"Schedule generation error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/rik/morning-briefing/{user_id}")
+async def get_morning_briefing(user_id: str):
+    """Generate morning briefing for the user"""
+    try:
+        user = await db.users.find_one({"id": user_id})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user_profile = UserProfile(**user)
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        schedule = await db.schedules.find({"user_id": user_id, "date": today}).sort("time", 1).to_list(100)
+        
+        # Get yesterday's performance
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        yesterday_analysis = await db.daily_analysis.find_one({"user_id": user_id, "date": yesterday})
+        
+        prompt = f"""
+Create a brief, energizing morning briefing for {user_profile.name}.
+
+Today: {datetime.now().strftime('%A, %B %d')}
+Their goal: {user_profile.goal_role}
+Schedule today: {len(schedule)} tasks planned
+Yesterday's score: {yesterday_analysis.get('overall_score', 'N/A') if yesterday_analysis else 'No data'}
+Streak: {user_profile.streak_days} days
+Points: {user_profile.points}
+
+First 3 tasks today:
+{chr(10).join([f"- {s['time']}: {s['title']}" for s in schedule[:3]]) if schedule else 'No schedule yet'}
+
+Create a 30-second briefing that:
+1. Greets them with energy
+2. States ONE key focus for today
+3. Mentions first task
+4. Ends with motivation
+
+Keep it under 60 words. Be direct.
+"""
+        
+        api_key = os.environ.get('EMERGENT_LLM_KEY')
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"briefing_{user_id}_{today}",
+            system_message="Create energizing morning briefings. Be concise."
+        ).with_model("openai", "gpt-5.2")
+        
+        response = await chat.send_message(UserMessage(text=prompt))
+        
+        return {
+            "briefing": response,
+            "schedule_count": len(schedule),
+            "first_task": schedule[0] if schedule else None,
+            "streak": user_profile.streak_days,
+            "points": user_profile.points
+        }
+        
+    except Exception as e:
+        logger.error(f"Briefing error: {str(e)}")
+        return {"briefing": f"Good morning {user_profile.name}! Ready to crush today?", "error": str(e)}
+
+@api_router.get("/rik/insights/{user_id}")
+async def get_user_insights(user_id: str):
+    """Get AI-generated insights about user's patterns"""
+    try:
+        user = await db.users.find_one({"id": user_id})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get last 7 days of data
+        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        
+        habit_logs = await db.habit_logs.find({
+            "user_id": user_id,
+            "date": {"$gte": week_ago}
+        }).to_list(500)
+        
+        schedule_logs = await db.schedules.find({
+            "user_id": user_id,
+            "date": {"$gte": week_ago}
+        }).to_list(500)
+        
+        analyses = await db.daily_analysis.find({
+            "user_id": user_id,
+            "date": {"$gte": week_ago}
+        }).to_list(7)
+        
+        # Calculate patterns
+        habits_completed = len([h for h in habit_logs if h.get('completed')])
+        habits_total = len(habit_logs)
+        tasks_completed = len([s for s in schedule_logs if s.get('completed')])
+        tasks_total = len(schedule_logs)
+        avg_score = sum([a.get('overall_score', 0) for a in analyses]) / len(analyses) if analyses else 0
+        
+        insights = []
+        
+        # Habit insight
+        if habits_total > 0:
+            habit_rate = (habits_completed / habits_total) * 100
+            insights.append({
+                "type": "pattern",
+                "title": "Habit Completion Rate",
+                "description": f"You've completed {habit_rate:.0f}% of your habits this week.",
+                "value": habit_rate
+            })
+        
+        # Task insight
+        if tasks_total > 0:
+            task_rate = (tasks_completed / tasks_total) * 100
+            insights.append({
+                "type": "pattern",
+                "title": "Schedule Follow-through",
+                "description": f"You've completed {task_rate:.0f}% of scheduled tasks.",
+                "value": task_rate
+            })
+        
+        # Score trend
+        if avg_score > 0:
+            insights.append({
+                "type": "achievement" if avg_score >= 70 else "warning",
+                "title": "Weekly Average Score",
+                "description": f"Your average daily score is {avg_score:.0f}/100.",
+                "value": avg_score
+            })
+        
+        return {"insights": insights, "period": "last_7_days"}
+        
+    except Exception as e:
+        logger.error(f"Insights error: {str(e)}")
+        return {"insights": [], "error": str(e)}
+
+# ==================== SCHEDULE ENDPOINTS ====================
 
 @api_router.get("/schedule/{user_id}/{date}")
 async def get_schedule(user_id: str, date: str):
@@ -293,83 +655,10 @@ async def get_schedule(user_id: str, date: str):
 @api_router.put("/schedule/{item_id}/complete")
 async def complete_schedule_item(item_id: str):
     await db.schedules.update_one({"id": item_id}, {"$set": {"completed": True}})
-    return {"status": "completed"}
-
-# ==================== RIK VOICE ASSISTANT ====================
-
-@api_router.post("/rik/command")
-async def process_rik_command(command: VoiceCommand):
-    """Process voice commands to Rik"""
-    try:
-        user = await db.users.find_one({"id": command.user_id})
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        user_profile = UserProfile(**user)
-        today = datetime.now().strftime("%Y-%m-%d")
-        current_time = datetime.now().strftime("%H:%M")
-        
-        # Get today's schedule
-        schedule = await db.schedules.find({"user_id": command.user_id, "date": today}).sort("time", 1).to_list(100)
-        schedule_summary = "\n".join([f"- {s['time']}: {s['title']} ({s['description']})" for s in schedule[:5]]) if schedule else "No schedule set for today"
-        
-        # Get habits status
-        habits = await db.habit_logs.find({"user_id": command.user_id, "date": today}).to_list(100)
-        habits_done = [h['habit_name'] for h in habits if h.get('completed')]
-        habits_pending = [h for h in user_profile.habits_to_build if h not in habits_done]
-        
-        system_prompt = f"""
-You are Rik, a strict but caring AI life coach assistant. You speak directly and firmly.
-You're helping {user_profile.name} transform from {user_profile.current_role} to {user_profile.goal_role}.
-
-Current time: {current_time}
-Today's date: {today}
-
-Today's Schedule:
-{schedule_summary}
-
-Habits completed today: {', '.join(habits_done) if habits_done else 'None yet'}
-Habits pending: {', '.join(habits_pending) if habits_pending else 'All done!'}
-
-User's challenges: {', '.join(user_profile.daily_challenges) if user_profile.daily_challenges else 'None mentioned'}
-Mode: {user_profile.assistant_mode}
-
-RESPONSE RULES:
-1. Keep responses SHORT (under 50 words for voice)
-2. Be direct and actionable
-3. If they ask what to do, tell them the NEXT task
-4. If they're procrastinating, call them out
-5. Use their name occasionally
-6. End with a clear instruction or question
-
-Respond as if speaking out loud.
-"""
-        
-        api_key = os.environ.get('EMERGENT_LLM_KEY')
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=f"rik_{command.user_id}",
-            system_message=system_prompt
-        ).with_model("openai", "gpt-5.2")
-        
-        user_message = UserMessage(text=command.command)
-        response = await chat.send_message(user_message)
-        
-        # Save to chat history
-        user_msg = ChatMessage(user_id=command.user_id, role="user", content=command.command, is_voice=True)
-        rik_msg = ChatMessage(user_id=command.user_id, role="assistant", content=response, is_voice=True)
-        await db.chat_messages.insert_one(user_msg.model_dump())
-        await db.chat_messages.insert_one(rik_msg.model_dump())
-        
-        return {"response": response, "message_id": rik_msg.id}
-        
-    except Exception as e:
-        logger.error(f"Rik command error: {str(e)}")
-        return {"response": "Sorry, I couldn't process that. Say it again?", "error": str(e)}
+    return {"status": "completed", "points_earned": 10}
 
 @api_router.get("/rik/next-task/{user_id}")
 async def get_next_task(user_id: str):
-    """Get the next upcoming task for proactive reminders"""
     today = datetime.now().strftime("%Y-%m-%d")
     current_time = datetime.now().strftime("%H:%M")
     
@@ -381,83 +670,38 @@ async def get_next_task(user_id: str):
     }).sort("time", 1).to_list(1)
     
     if schedule:
-        next_item = schedule[0]
-        return {
-            "has_task": True,
-            "task": next_item,
-            "message": f"Coming up at {next_item['time']}: {next_item['title']}"
-        }
-    return {"has_task": False, "message": "No more scheduled tasks for today"}
+        return {"has_task": True, "task": schedule[0]}
+    return {"has_task": False, "message": "No more tasks scheduled"}
 
 @api_router.get("/rik/status/{user_id}")
 async def get_rik_status(user_id: str):
-    """Get current status for Rik to announce"""
     user = await db.users.find_one({"id": user_id})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
     user_profile = UserProfile(**user)
     today = datetime.now().strftime("%Y-%m-%d")
-    current_time = datetime.now().strftime("%H:%M")
     current_hour = datetime.now().hour
     
-    # Get schedule stats
     schedule = await db.schedules.find({"user_id": user_id, "date": today}).to_list(100)
-    completed = len([s for s in schedule if s.get('completed')])
-    total = len(schedule)
-    
-    # Get habits
     habit_logs = await db.habit_logs.find({"user_id": user_id, "date": today}).to_list(100)
-    habits_done = len([h for h in habit_logs if h.get('completed')])
-    habits_total = len(user_profile.habits_to_build) + len(user_profile.habits_to_quit)
     
-    # Determine greeting
-    if current_hour < 12:
-        greeting = "Good morning"
-    elif current_hour < 17:
-        greeting = "Good afternoon"
-    else:
-        greeting = "Good evening"
+    greeting = "Good morning" if current_hour < 12 else "Good afternoon" if current_hour < 17 else "Good evening"
     
     return {
         "greeting": greeting,
         "name": user_profile.name,
-        "schedule_completed": completed,
-        "schedule_total": total,
-        "habits_done": habits_done,
-        "habits_total": habits_total,
-        "current_time": current_time
+        "schedule_completed": len([s for s in schedule if s.get('completed')]),
+        "schedule_total": len(schedule),
+        "habits_done": len([h for h in habit_logs if h.get('completed')]),
+        "habits_total": len(user_profile.habits_to_build) + len(user_profile.habits_to_quit),
+        "points": user_profile.points,
+        "streak": user_profile.streak_days,
+        "routine_learned": user_profile.routine_learned,
+        "current_time": datetime.now().strftime("%H:%M")
     }
 
-# ==================== LOCATION TRACKING ====================
-
-@api_router.post("/location/log")
-async def log_location(user_id: str, latitude: float, longitude: float):
-    """Log user location for context-aware assistance"""
-    log = LocationLog(user_id=user_id, latitude=latitude, longitude=longitude)
-    await db.location_logs.insert_one(log.model_dump())
-    
-    # Determine location type
-    user = await db.users.find_one({"id": user_id})
-    location_type = "other"
-    if user:
-        # Simple distance check (would use proper geo distance in production)
-        if user.get("location_home"):
-            home = user["location_home"]
-            if abs(home.get("lat", 0) - latitude) < 0.001 and abs(home.get("lng", 0) - longitude) < 0.001:
-                location_type = "home"
-        if user.get("location_work"):
-            work = user["location_work"]
-            if abs(work.get("lat", 0) - latitude) < 0.001 and abs(work.get("lng", 0) - longitude) < 0.001:
-                location_type = "work"
-        if user.get("location_gym"):
-            gym = user["location_gym"]
-            if abs(gym.get("lat", 0) - latitude) < 0.001 and abs(gym.get("lng", 0) - longitude) < 0.001:
-                location_type = "gym"
-    
-    return {"logged": True, "location_type": location_type}
-
-# ==================== HABIT TRACKING ====================
+# ==================== HABITS ====================
 
 @api_router.post("/habits/log", response_model=HabitLog)
 async def log_habit(habit_data: HabitLogCreate):
@@ -477,6 +721,11 @@ async def log_habit(habit_data: HabitLogCreate):
     
     habit_log = HabitLog(**habit_data.model_dump())
     await db.habit_logs.insert_one(habit_log.model_dump())
+    
+    # Add points for completing habit
+    if habit_data.completed:
+        await db.users.update_one({"id": habit_data.user_id}, {"$inc": {"points": 5}})
+    
     return habit_log
 
 @api_router.get("/habits/{user_id}/streaks")
@@ -514,7 +763,7 @@ async def get_habits_for_date(user_id: str, date: str):
     logs = await db.habit_logs.find({"user_id": user_id, "date": date}).to_list(100)
     return [HabitLog(**log) for log in logs]
 
-# ==================== DAILY ANALYSIS ====================
+# ==================== ANALYSIS ====================
 
 @api_router.post("/analysis/{user_id}")
 async def generate_daily_analysis(user_id: str, date: str = None):
@@ -531,28 +780,24 @@ async def generate_daily_analysis(user_id: str, date: str = None):
         habits = await db.habit_logs.find({"user_id": user_id, "date": date}).to_list(100)
         schedule = await db.schedules.find({"user_id": user_id, "date": date}).to_list(100)
         
-        habits_summary = "\n".join([f"- {h['habit_name']}: {'Done' if h['completed'] else 'Missed'}" for h in habits])
-        schedule_summary = "\n".join([f"- {s['time']} {s['title']}: {'Done' if s['completed'] else 'Missed'}" for s in schedule])
+        habits_done = len([h for h in habits if h.get('completed')])
+        tasks_done = len([s for s in schedule if s.get('completed')])
         
         prompt = f"""
-As Rik, analyze {user_profile.name}'s day and give a STRICT performance review.
+Analyze {user_profile.name}'s day as Rik (strict coach).
 
-Goal: {user_profile.current_role} → {user_profile.goal_role}
-Challenges: {', '.join(user_profile.daily_challenges)}
+Goal: {user_profile.goal_role}
+Habits: {habits_done}/{len(habits)} done
+Tasks: {tasks_done}/{len(schedule)} done
 
-Habits:
-{habits_summary if habits_summary else 'Nothing logged'}
-
-Schedule:
-{schedule_summary if schedule_summary else 'Nothing scheduled'}
-
-Return JSON only:
+Return JSON:
 {{
-    "summary": "2 sentence overview - be direct",
+    "summary": "2 sentences - direct assessment",
     "achievements": ["what they did well"],
-    "improvements": ["what they need to fix"],
+    "improvements": ["what needs work"],
     "recommendations": ["specific action for tomorrow"],
-    "overall_score": 75
+    "overall_score": 75,
+    "points_earned": {(habits_done * 5) + (tasks_done * 10)}
 }}
 """
         
@@ -560,39 +805,38 @@ Return JSON only:
         chat = LlmChat(
             api_key=api_key,
             session_id=f"analysis_{user_id}_{date}",
-            system_message="You are Rik, a strict life coach. Return only valid JSON."
+            system_message="Analyze performance. Return only JSON."
         ).with_model("openai", "gpt-5.2")
         
-        user_message = UserMessage(text=prompt)
-        response = await chat.send_message(user_message)
-        
-        import json
-        clean_response = response.strip()
-        if clean_response.startswith("```"):
-            clean_response = clean_response.split("```")[1]
-            if clean_response.startswith("json"):
-                clean_response = clean_response[4:]
+        response = await chat.send_message(UserMessage(text=prompt))
         
         try:
-            analysis_data = json.loads(clean_response.strip())
+            clean = response.strip()
+            if clean.startswith("```"):
+                clean = clean.split("```")[1]
+                if clean.startswith("json"):
+                    clean = clean[4:]
+            data = json.loads(clean.strip())
         except:
-            analysis_data = {"summary": response[:200], "achievements": [], "improvements": [], "recommendations": [], "overall_score": 50}
+            data = {"summary": "Day completed.", "achievements": [], "improvements": [], "recommendations": [], "overall_score": 50, "points_earned": 0}
+        
+        # Add points
+        points = data.get("points_earned", 0)
+        await db.users.update_one({"id": user_id}, {"$inc": {"points": points}})
         
         analysis = DailyAnalysis(
             user_id=user_id,
             date=date,
-            summary=analysis_data.get("summary", ""),
-            achievements=analysis_data.get("achievements", []),
-            improvements=analysis_data.get("improvements", []),
-            recommendations=analysis_data.get("recommendations", []),
-            overall_score=analysis_data.get("overall_score", 50)
+            summary=data.get("summary", ""),
+            achievements=data.get("achievements", []),
+            improvements=data.get("improvements", []),
+            recommendations=data.get("recommendations", []),
+            overall_score=data.get("overall_score", 50),
+            points_earned=points
         )
         
-        existing = await db.daily_analysis.find_one({"user_id": user_id, "date": date})
-        if existing:
-            await db.daily_analysis.update_one({"id": existing["id"]}, {"$set": analysis.model_dump()})
-        else:
-            await db.daily_analysis.insert_one(analysis.model_dump())
+        await db.daily_analysis.delete_many({"user_id": user_id, "date": date})
+        await db.daily_analysis.insert_one(analysis.model_dump())
         
         return analysis
         
@@ -603,9 +847,7 @@ Return JSON only:
 @api_router.get("/analysis/{user_id}/{date}")
 async def get_daily_analysis(user_id: str, date: str):
     analysis = await db.daily_analysis.find_one({"user_id": user_id, "date": date})
-    if analysis:
-        return DailyAnalysis(**analysis)
-    return None
+    return DailyAnalysis(**analysis) if analysis else None
 
 @api_router.get("/chat/{user_id}/history")
 async def get_chat_history(user_id: str, limit: int = 50):
