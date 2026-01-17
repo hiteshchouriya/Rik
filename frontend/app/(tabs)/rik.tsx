@@ -8,7 +8,9 @@ import {
   TextInput,
   ActivityIndicator,
   Animated,
+  KeyboardAvoidingView,
   Platform,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -23,6 +25,19 @@ interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  type?: string;
+}
+
+interface RikStatus {
+  greeting: string;
+  name: string;
+  schedule_completed: number;
+  schedule_total: number;
+  habits_done: number;
+  habits_total: number;
+  points: number;
+  streak: number;
+  routine_learned: boolean;
 }
 
 export default function RikScreen() {
@@ -30,11 +45,12 @@ export default function RikScreen() {
   const [userName, setUserName] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
-  const [isListening, setIsListening] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isRikActive, setIsRikActive] = useState(false);
-  const [rikStatus, setRikStatus] = useState<any>(null);
-  const [nextTask, setNextTask] = useState<any>(null);
+  const [rikStatus, setRikStatus] = useState<RikStatus | null>(null);
+  const [currentMode, setCurrentMode] = useState<'general' | 'learning_routine' | 'planning_day'>('general');
+  const [isRecording, setIsRecording] = useState(false);
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
   
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const inactivityTimer = useRef<NodeJS.Timeout | null>(null);
@@ -44,7 +60,7 @@ export default function RikScreen() {
 
   useEffect(() => {
     loadUser();
-    startPulseAnimation();
+    requestAudioPermission();
     return () => {
       if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
     };
@@ -53,9 +69,28 @@ export default function RikScreen() {
   useEffect(() => {
     if (userId) {
       fetchRikStatus();
-      fetchNextTask();
     }
   }, [userId]);
+
+  useEffect(() => {
+    if (isRikActive) {
+      startPulseAnimation();
+    } else {
+      pulseAnim.setValue(1);
+    }
+  }, [isRikActive]);
+
+  const requestAudioPermission = async () => {
+    try {
+      await Audio.requestPermissionsAsync();
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+    } catch (err) {
+      console.log('Audio permission error:', err);
+    }
+  };
 
   const loadUser = async () => {
     const id = await AsyncStorage.getItem('userId');
@@ -73,28 +108,15 @@ export default function RikScreen() {
         setRikStatus(data);
       }
     } catch (e) {
-      console.error('Error fetching status:', e);
-    }
-  };
-
-  const fetchNextTask = async () => {
-    if (!userId) return;
-    try {
-      const res = await fetch(`${API_URL}/api/rik/next-task/${userId}`);
-      if (res.ok) {
-        const data = await res.json();
-        setNextTask(data);
-      }
-    } catch (e) {
-      console.error('Error fetching next task:', e);
+      console.error('Error:', e);
     }
   };
 
   const startPulseAnimation = () => {
     Animated.loop(
       Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1.1, duration: 1000, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1.15, duration: 800, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
       ])
     ).start();
   };
@@ -103,99 +125,155 @@ export default function RikScreen() {
     if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
     inactivityTimer.current = setTimeout(() => {
       if (isRikActive) {
-        deactivateRik();
+        speak("Going to sleep. Say my name when you need me.");
+        setTimeout(() => setIsRikActive(false), 2000);
       }
-    }, 60000); // 1 minute timeout
+    }, 60000);
   };
 
   const activateRik = async () => {
     setIsRikActive(true);
     resetInactivityTimer();
     
-    // Rik greets
-    const greeting = rikStatus 
-      ? `${rikStatus.greeting} ${rikStatus.name}. You've completed ${rikStatus.schedule_completed} of ${rikStatus.schedule_total} tasks. What do you need?`
-      : "I'm here. What do you need?";
-    
-    speak(greeting);
-    addMessage('assistant', greeting);
-  };
-
-  const deactivateRik = () => {
-    setIsRikActive(false);
-    Speech.stop();
-    if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
+    // Check if routine is learned
+    if (rikStatus && !rikStatus.routine_learned) {
+      const greeting = `Hey ${userName}! Before I can help you properly, I need to learn your actual daily routine. Want me to ask you a few questions? Just say yes or type 'learn my routine'.`;
+      speak(greeting);
+      addMessage('assistant', greeting);
+    } else {
+      const greeting = `${rikStatus?.greeting || 'Hey'} ${userName}! You've done ${rikStatus?.schedule_completed || 0} of ${rikStatus?.schedule_total || 0} tasks. What do you need?`;
+      speak(greeting);
+      addMessage('assistant', greeting);
+    }
   };
 
   const speak = (text: string) => {
     Speech.speak(text, {
       language: 'en-US',
       pitch: 1.0,
-      rate: 0.9,
-      onDone: () => {
-        resetInactivityTimer();
-      },
+      rate: 0.95,
+      onDone: () => resetInactivityTimer(),
     });
   };
 
-  const addMessage = (role: 'user' | 'assistant', content: string) => {
-    const newMsg: Message = {
-      id: Date.now().toString(),
-      role,
-      content,
-    };
+  const stopSpeaking = () => {
+    Speech.stop();
+  };
+
+  const addMessage = (role: 'user' | 'assistant', content: string, type?: string) => {
+    const newMsg: Message = { id: Date.now().toString(), role, content, type };
     setMessages(prev => [...prev, newMsg]);
     setTimeout(() => scrollViewRef.current?.scrollToEnd(), 100);
   };
 
-  const sendCommand = async (command: string) => {
-    if (!userId || !command.trim()) return;
+  const startRecording = async () => {
+    try {
+      setIsRecording(true);
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+      setRecording(recording);
+    } catch (err) {
+      console.error('Recording error:', err);
+      setIsRecording(false);
+      Alert.alert('Error', 'Could not start recording. Please type instead.');
+    }
+  };
+
+  const stopRecording = async () => {
+    if (!recording) return;
     
-    // Check for deactivation words
-    const lowerCommand = command.toLowerCase();
-    if (lowerCommand.includes('over') && lowerCommand.includes('out')) {
-      speak('Going to sleep. Call my name when you need me.');
-      addMessage('assistant', 'Going to sleep. Call my name when you need me.');
-      setTimeout(deactivateRik, 2000);
+    setIsRecording(false);
+    await recording.stopAndUnloadAsync();
+    const uri = recording.getURI();
+    setRecording(null);
+    
+    // For now, prompt user to type - voice-to-text requires additional API
+    Alert.alert(
+      'Voice Input',
+      'Voice recognition requires external API. Please type your message for now.',
+      [{ text: 'OK' }]
+    );
+  };
+
+  const sendMessage = async (text: string, context?: string) => {
+    if (!userId || !text.trim()) return;
+    
+    const message = text.trim().toLowerCase();
+    resetInactivityTimer();
+    
+    // Check for special commands
+    if (message.includes('over') && message.includes('out')) {
+      speak('Going to sleep. Call me when you need me.');
+      addMessage('user', text);
+      addMessage('assistant', 'Going to sleep. Call me when you need me.');
+      setTimeout(() => setIsRikActive(false), 2000);
       return;
     }
     
-    resetInactivityTimer();
-    addMessage('user', command);
+    // Determine context
+    let chatContext = context || currentMode;
+    if (message.includes('learn') && message.includes('routine')) {
+      chatContext = 'learning_routine';
+      setCurrentMode('learning_routine');
+    } else if (message.includes('plan') && (message.includes('day') || message.includes('today'))) {
+      chatContext = 'planning_day';
+      setCurrentMode('planning_day');
+    } else if (message.includes('generate') && message.includes('schedule')) {
+      // Generate schedule
+      generateSchedule();
+      return;
+    }
+    
+    addMessage('user', text);
+    setInputText('');
     setIsProcessing(true);
     
     try {
-      const res = await fetch(`${API_URL}/api/rik/command`, {
+      const res = await fetch(`${API_URL}/api/rik/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: userId, command }),
+        body: JSON.stringify({
+          user_id: userId,
+          message: text,
+          context: chatContext,
+        }),
       });
       
       if (res.ok) {
         const data = await res.json();
-        addMessage('assistant', data.response);
+        addMessage('assistant', data.response, data.response_type);
         speak(data.response);
-        fetchNextTask(); // Refresh next task
+        
+        // Handle special actions
+        if (data.action_required === 'generate_schedule') {
+          // Show generate button
+        } else if (data.response_type === 'suggest_learning') {
+          setCurrentMode('learning_routine');
+        }
+        
+        // Refresh status
+        fetchRikStatus();
       }
     } catch (e) {
       console.error('Error:', e);
-      const errorMsg = "Sorry, couldn't process that. Try again.";
+      const errorMsg = "Couldn't process that. Try again?";
       addMessage('assistant', errorMsg);
       speak(errorMsg);
     } finally {
       setIsProcessing(false);
-      setInputText('');
     }
   };
 
   const generateSchedule = async () => {
     if (!userId) return;
-    setIsProcessing(true);
     
-    speak("Alright, let me plan your day. Give me a moment.");
+    addMessage('user', 'Generate my schedule');
+    setIsProcessing(true);
+    speak("Creating your schedule based on what I know about you. One moment.");
     
     try {
-      const res = await fetch(`${API_URL}/api/schedule/generate`, {
+      const res = await fetch(`${API_URL}/api/rik/generate-smart-schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: userId, date: today }),
@@ -203,10 +281,36 @@ export default function RikScreen() {
       
       if (res.ok) {
         const data = await res.json();
-        const msg = `Your schedule is ready. ${data.schedule?.length || 0} tasks planned. Check your Schedule tab.`;
+        const msg = `Done! I've created ${data.count} tasks for today based on your routine. Check the Schedule tab to see your day.`;
         addMessage('assistant', msg);
         speak(msg);
-        fetchNextTask();
+        fetchRikStatus();
+        setCurrentMode('general');
+      }
+    } catch (e) {
+      console.error('Error:', e);
+      addMessage('assistant', "Couldn't generate schedule. Try again.");
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const learnRoutine = async () => {
+    if (!userId) return;
+    
+    setIsProcessing(true);
+    
+    try {
+      const res = await fetch(`${API_URL}/api/rik/learn-routine?user_id=${userId}`, {
+        method: 'POST',
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        addMessage('assistant', `Got it! I've saved your routine. Here's what I understood:\n\n${data.routine}\n\nNow I can create better schedules for you!`);
+        speak("Perfect! I've learned your routine. Now I can help you better.");
+        fetchRikStatus();
+        setCurrentMode('general');
       }
     } catch (e) {
       console.error('Error:', e);
@@ -215,195 +319,275 @@ export default function RikScreen() {
     }
   };
 
-  const quickCommands = [
-    { text: "What's next?", icon: "arrow-forward" },
-    { text: "How am I doing?", icon: "stats-chart" },
-    { text: "Motivate me", icon: "flame" },
-    { text: "Over & Out", icon: "moon" },
+  const getMorningBriefing = async () => {
+    if (!userId) return;
+    
+    setIsProcessing(true);
+    
+    try {
+      const res = await fetch(`${API_URL}/api/rik/morning-briefing/${userId}`);
+      if (res.ok) {
+        const data = await res.json();
+        addMessage('assistant', data.briefing);
+        speak(data.briefing);
+      }
+    } catch (e) {
+      console.error('Error:', e);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const quickActions = [
+    { text: "Learn my routine", icon: "school", action: () => sendMessage("Learn my routine", 'learning_routine') },
+    { text: "Plan my day", icon: "calendar", action: () => sendMessage("Help me plan my day", 'planning_day') },
+    { text: "Morning briefing", icon: "sunny", action: getMorningBriefing },
+    { text: "Generate schedule", icon: "flash", action: generateSchedule },
+  ];
+
+  const quickResponses = [
+    "What should I do now?",
+    "I'm feeling unmotivated",
+    "Check my progress",
+    "Over & Out",
   ];
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* Header with status */}
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.greeting}>
-            {rikStatus?.greeting || 'Hello'}, {userName}
-          </Text>
-          <Text style={styles.statusText}>
-            {rikStatus ? `${rikStatus.schedule_completed}/${rikStatus.schedule_total} tasks | ${rikStatus.habits_done}/${rikStatus.habits_total} habits` : 'Loading...'}
-          </Text>
-        </View>
-        <Text style={styles.time}>{format(new Date(), 'HH:mm')}</Text>
-      </View>
-
-      {/* Next Task Card */}
-      {nextTask?.has_task && (
-        <View style={styles.nextTaskCard}>
-          <Ionicons name="time" size={20} color="#f59e0b" />
-          <View style={styles.nextTaskContent}>
-            <Text style={styles.nextTaskLabel}>Coming Up</Text>
-            <Text style={styles.nextTaskTitle}>{nextTask.task.time} - {nextTask.task.title}</Text>
+      <KeyboardAvoidingView 
+        style={styles.keyboardView}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        {/* Header */}
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.greeting}>{rikStatus?.greeting || 'Hello'}, {userName}</Text>
+            <Text style={styles.statusText}>
+              {rikStatus?.points || 0} pts | {rikStatus?.streak || 0} day streak
+            </Text>
+          </View>
+          <View style={styles.headerRight}>
+            <Text style={styles.time}>{format(new Date(), 'HH:mm')}</Text>
+            {!rikStatus?.routine_learned && (
+              <View style={styles.warningBadge}>
+                <Ionicons name="warning" size={12} color="#f59e0b" />
+              </View>
+            )}
           </View>
         </View>
-      )}
 
-      {/* Rik Avatar & Activation */}
-      <View style={styles.rikSection}>
-        <TouchableOpacity 
-          onPress={isRikActive ? () => {} : activateRik}
-          activeOpacity={0.8}
-        >
-          <Animated.View style={[
-            styles.rikAvatar,
-            isRikActive && styles.rikAvatarActive,
-            { transform: [{ scale: isRikActive ? pulseAnim : 1 }] }
-          ]}>
-            <Ionicons 
-              name={isRikActive ? "mic" : "mic-outline"} 
-              size={48} 
-              color={isRikActive ? "#fff" : "#6366f1"} 
-            />
-          </Animated.View>
-        </TouchableOpacity>
-        <Text style={styles.rikLabel}>
-          {isRikActive ? "Rik is listening..." : "Tap to activate Rik"}
-        </Text>
+        {/* Status Cards */}
         {!isRikActive && (
-          <Text style={styles.rikHint}>Or say "Rik" to wake me up</Text>
+          <View style={styles.statusCards}>
+            <View style={styles.statusCard}>
+              <Text style={styles.statusValue}>{rikStatus?.schedule_completed || 0}/{rikStatus?.schedule_total || 0}</Text>
+              <Text style={styles.statusLabel}>Tasks</Text>
+            </View>
+            <View style={styles.statusCard}>
+              <Text style={styles.statusValue}>{rikStatus?.habits_done || 0}/{rikStatus?.habits_total || 0}</Text>
+              <Text style={styles.statusLabel}>Habits</Text>
+            </View>
+            <View style={[styles.statusCard, !rikStatus?.routine_learned && styles.statusCardWarning]}>
+              <Ionicons name={rikStatus?.routine_learned ? "checkmark-circle" : "alert-circle"} size={24} color={rikStatus?.routine_learned ? "#10b981" : "#f59e0b"} />
+              <Text style={styles.statusLabel}>{rikStatus?.routine_learned ? "Routine Set" : "Setup Needed"}</Text>
+            </View>
+          </View>
         )}
-      </View>
 
-      {/* Messages */}
-      {isRikActive && (
-        <ScrollView 
-          ref={scrollViewRef}
-          style={styles.messagesContainer}
-          contentContainerStyle={styles.messagesContent}
-          showsVerticalScrollIndicator={false}
-        >
-          {messages.map((msg) => (
-            <View 
-              key={msg.id} 
-              style={[styles.messageBubble, msg.role === 'user' ? styles.userBubble : styles.rikBubble]}
-            >
-              <Text style={styles.messageText}>{msg.content}</Text>
-            </View>
-          ))}
-          {isProcessing && (
-            <View style={styles.rikBubble}>
-              <ActivityIndicator size="small" color="#6366f1" />
-            </View>
-          )}
-        </ScrollView>
-      )}
-
-      {/* Quick Commands */}
-      {isRikActive && (
-        <View style={styles.quickCommands}>
-          {quickCommands.map((cmd, i) => (
-            <TouchableOpacity 
-              key={i} 
-              style={styles.quickCmd}
-              onPress={() => sendCommand(cmd.text)}
-            >
-              <Ionicons name={cmd.icon as any} size={16} color="#6366f1" />
-              <Text style={styles.quickCmdText}>{cmd.text}</Text>
+        {/* Rik Avatar */}
+        {!isRikActive ? (
+          <View style={styles.rikSection}>
+            <TouchableOpacity onPress={activateRik} activeOpacity={0.8}>
+              <View style={styles.rikAvatar}>
+                <Ionicons name="mic-outline" size={48} color="#6366f1" />
+              </View>
             </TouchableOpacity>
-          ))}
-        </View>
-      )}
+            <Text style={styles.rikLabel}>Tap to talk to Rik</Text>
+            
+            {/* Quick Actions */}
+            <View style={styles.quickActions}>
+              {quickActions.map((action, i) => (
+                <TouchableOpacity 
+                  key={i} 
+                  style={styles.quickAction}
+                  onPress={() => { activateRik(); setTimeout(action.action, 500); }}
+                >
+                  <Ionicons name={action.icon as any} size={20} color="#6366f1" />
+                  <Text style={styles.quickActionText}>{action.text}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        ) : (
+          /* Active Conversation */
+          <>
+            {/* Mode Indicator */}
+            {currentMode !== 'general' && (
+              <View style={styles.modeIndicator}>
+                <Ionicons 
+                  name={currentMode === 'learning_routine' ? 'school' : 'calendar'} 
+                  size={16} 
+                  color="#6366f1" 
+                />
+                <Text style={styles.modeText}>
+                  {currentMode === 'learning_routine' ? 'Learning Your Routine' : 'Planning Your Day'}
+                </Text>
+                {currentMode === 'learning_routine' && (
+                  <TouchableOpacity style={styles.saveModeBtn} onPress={learnRoutine}>
+                    <Text style={styles.saveModeBtnText}>Save Routine</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            )}
 
-      {/* Input Area */}
-      {isRikActive && (
-        <View style={styles.inputContainer}>
-          <TextInput
-            style={styles.input}
-            placeholder="Type or speak to Rik..."
-            placeholderTextColor="#6b7280"
-            value={inputText}
-            onChangeText={setInputText}
-            onSubmitEditing={() => sendCommand(inputText)}
-          />
-          <TouchableOpacity 
-            style={styles.sendButton}
-            onPress={() => sendCommand(inputText)}
-            disabled={isProcessing}
-          >
-            <Ionicons name="send" size={20} color="#fff" />
-          </TouchableOpacity>
-        </View>
-      )}
+            {/* Messages */}
+            <ScrollView 
+              ref={scrollViewRef}
+              style={styles.messagesContainer}
+              contentContainerStyle={styles.messagesContent}
+              showsVerticalScrollIndicator={false}
+            >
+              {messages.map((msg) => (
+                <View 
+                  key={msg.id} 
+                  style={[styles.messageBubble, msg.role === 'user' ? styles.userBubble : styles.rikBubble]}
+                >
+                  <Text style={styles.messageText}>{msg.content}</Text>
+                </View>
+              ))}
+              {isProcessing && (
+                <View style={styles.rikBubble}>
+                  <ActivityIndicator size="small" color="#6366f1" />
+                </View>
+              )}
+            </ScrollView>
 
-      {/* Generate Schedule Button (when not active) */}
-      {!isRikActive && (
-        <TouchableOpacity style={styles.generateButton} onPress={generateSchedule}>
-          <Ionicons name="calendar" size={24} color="#fff" />
-          <Text style={styles.generateButtonText}>Generate Today's Schedule</Text>
-        </TouchableOpacity>
-      )}
+            {/* Quick Responses */}
+            <ScrollView 
+              horizontal 
+              showsHorizontalScrollIndicator={false}
+              style={styles.quickResponsesContainer}
+              contentContainerStyle={styles.quickResponsesContent}
+            >
+              {quickResponses.map((text, i) => (
+                <TouchableOpacity 
+                  key={i} 
+                  style={styles.quickResponse}
+                  onPress={() => sendMessage(text)}
+                >
+                  <Text style={styles.quickResponseText}>{text}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            {/* Input */}
+            <View style={styles.inputContainer}>
+              <TouchableOpacity 
+                style={[styles.micButton, isRecording && styles.micButtonRecording]}
+                onPressIn={startRecording}
+                onPressOut={stopRecording}
+              >
+                <Ionicons name={isRecording ? "radio" : "mic"} size={20} color="#fff" />
+              </TouchableOpacity>
+              <TextInput
+                style={styles.input}
+                placeholder="Type your message..."
+                placeholderTextColor="#6b7280"
+                value={inputText}
+                onChangeText={setInputText}
+                onSubmitEditing={() => sendMessage(inputText)}
+                returnKeyType="send"
+              />
+              <TouchableOpacity 
+                style={[styles.sendButton, !inputText.trim() && styles.sendButtonDisabled]}
+                onPress={() => sendMessage(inputText)}
+                disabled={!inputText.trim() || isProcessing}
+              >
+                <Ionicons name="send" size={18} color="#fff" />
+              </TouchableOpacity>
+            </View>
+          </>
+        )}
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0a0a0f' },
+  keyboardView: { flex: 1 },
   header: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     padding: 20, paddingBottom: 10,
   },
   greeting: { color: '#fff', fontSize: 22, fontWeight: 'bold' },
   statusText: { color: '#6b7280', fontSize: 13, marginTop: 4 },
+  headerRight: { alignItems: 'flex-end' },
   time: { color: '#6366f1', fontSize: 24, fontWeight: 'bold' },
-  nextTaskCard: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    backgroundColor: '#1f2937', marginHorizontal: 20, marginBottom: 16,
-    padding: 16, borderRadius: 12, borderLeftWidth: 4, borderLeftColor: '#f59e0b',
+  warningBadge: {
+    backgroundColor: '#f59e0b20', padding: 4, borderRadius: 8, marginTop: 4,
   },
-  nextTaskContent: { flex: 1 },
-  nextTaskLabel: { color: '#f59e0b', fontSize: 12, fontWeight: '600' },
-  nextTaskTitle: { color: '#fff', fontSize: 16, marginTop: 2 },
-  rikSection: { alignItems: 'center', paddingVertical: 32 },
+  statusCards: { flexDirection: 'row', paddingHorizontal: 20, gap: 12, marginBottom: 16 },
+  statusCard: {
+    flex: 1, backgroundColor: '#1f2937', borderRadius: 12, padding: 12, alignItems: 'center',
+  },
+  statusCardWarning: { borderWidth: 1, borderColor: '#f59e0b' },
+  statusValue: { color: '#fff', fontSize: 20, fontWeight: 'bold' },
+  statusLabel: { color: '#6b7280', fontSize: 11, marginTop: 4 },
+  rikSection: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 },
   rikAvatar: {
-    width: 120, height: 120, borderRadius: 60,
+    width: 140, height: 140, borderRadius: 70,
     backgroundColor: '#1f2937', alignItems: 'center', justifyContent: 'center',
     borderWidth: 3, borderColor: '#6366f1',
   },
-  rikAvatarActive: { backgroundColor: '#6366f1', borderColor: '#818cf8' },
-  rikLabel: { color: '#fff', fontSize: 18, fontWeight: '600', marginTop: 16 },
-  rikHint: { color: '#6b7280', fontSize: 14, marginTop: 4 },
+  rikLabel: { color: '#fff', fontSize: 18, fontWeight: '600', marginTop: 20 },
+  quickActions: {
+    flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center',
+    gap: 10, marginTop: 32, paddingHorizontal: 10,
+  },
+  quickAction: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#1f2937', paddingHorizontal: 16, paddingVertical: 12,
+    borderRadius: 12, borderWidth: 1, borderColor: '#374151',
+  },
+  quickActionText: { color: '#e5e7eb', fontSize: 14 },
+  modeIndicator: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#6366f120', marginHorizontal: 20, marginBottom: 8,
+    padding: 10, borderRadius: 8,
+  },
+  modeText: { color: '#6366f1', fontSize: 13, flex: 1 },
+  saveModeBtn: { backgroundColor: '#6366f1', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6 },
+  saveModeBtnText: { color: '#fff', fontSize: 12, fontWeight: '600' },
   messagesContainer: { flex: 1, paddingHorizontal: 20 },
-  messagesContent: { paddingBottom: 16 },
+  messagesContent: { paddingBottom: 8 },
   messageBubble: { maxWidth: '80%', padding: 12, borderRadius: 16, marginBottom: 8 },
   userBubble: { backgroundColor: '#6366f1', alignSelf: 'flex-end', borderBottomRightRadius: 4 },
   rikBubble: { backgroundColor: '#1f2937', alignSelf: 'flex-start', borderBottomLeftRadius: 4 },
   messageText: { color: '#fff', fontSize: 15, lineHeight: 22 },
-  quickCommands: {
-    flexDirection: 'row', flexWrap: 'wrap', gap: 8,
-    paddingHorizontal: 20, paddingVertical: 12,
-  },
-  quickCmd: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
+  quickResponsesContainer: { maxHeight: 50 },
+  quickResponsesContent: { paddingHorizontal: 20, gap: 8 },
+  quickResponse: {
     backgroundColor: '#1f2937', paddingHorizontal: 14, paddingVertical: 8,
-    borderRadius: 20, borderWidth: 1, borderColor: '#374151',
+    borderRadius: 16, borderWidth: 1, borderColor: '#374151', marginRight: 8,
   },
-  quickCmdText: { color: '#e5e7eb', fontSize: 13 },
+  quickResponseText: { color: '#e5e7eb', fontSize: 13 },
   inputContainer: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
+    flexDirection: 'row', alignItems: 'center', gap: 10,
     padding: 16, borderTopWidth: 1, borderTopColor: '#1f2937',
   },
-  input: {
-    flex: 1, backgroundColor: '#1f2937', borderRadius: 24,
-    paddingHorizontal: 20, paddingVertical: 12, color: '#fff', fontSize: 16,
-  },
-  sendButton: {
-    width: 48, height: 48, borderRadius: 24, backgroundColor: '#6366f1',
+  micButton: {
+    width: 44, height: 44, borderRadius: 22, backgroundColor: '#374151',
     alignItems: 'center', justifyContent: 'center',
   },
-  generateButton: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12,
-    backgroundColor: '#6366f1', marginHorizontal: 20, marginBottom: 20,
-    padding: 18, borderRadius: 16,
+  micButtonRecording: { backgroundColor: '#ef4444' },
+  input: {
+    flex: 1, backgroundColor: '#1f2937', borderRadius: 22,
+    paddingHorizontal: 18, paddingVertical: 10, color: '#fff', fontSize: 15,
   },
-  generateButtonText: { color: '#fff', fontSize: 17, fontWeight: '600' },
+  sendButton: {
+    width: 44, height: 44, borderRadius: 22, backgroundColor: '#6366f1',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  sendButtonDisabled: { backgroundColor: '#374151' },
 });
