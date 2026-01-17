@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Alert,
+  AppState,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -18,6 +19,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Speech from 'expo-speech';
 import { Audio } from 'expo-av';
 import { format } from 'date-fns';
+import Voice, { SpeechResultsEvent, SpeechErrorEvent } from '@react-native-voice/voice';
 
 const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -49,20 +51,66 @@ export default function RikScreen() {
   const [isRikActive, setIsRikActive] = useState(false);
   const [rikStatus, setRikStatus] = useState<RikStatus | null>(null);
   const [currentMode, setCurrentMode] = useState<'general' | 'learning_routine' | 'planning_day'>('general');
-  const [isRecording, setIsRecording] = useState(false);
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  
+  // Voice recognition states
+  const [isListening, setIsListening] = useState(false);
+  const [isWakeWordListening, setIsWakeWordListening] = useState(false);
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [recognizedText, setRecognizedText] = useState('');
+  const [listeningStatus, setListeningStatus] = useState('Tap mic or say "Rik"');
   
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const wakeWordPulse = useRef(new Animated.Value(1)).current;
   const inactivityTimer = useRef<NodeJS.Timeout | null>(null);
   const scrollViewRef = useRef<ScrollView>(null);
+  const appState = useRef(AppState.currentState);
 
   const today = format(new Date(), 'yyyy-MM-dd');
 
+  // Initialize Voice Recognition
   useEffect(() => {
+    const initVoice = async () => {
+      try {
+        const isAvailable = await Voice.isAvailable();
+        setVoiceSupported(!!isAvailable);
+        
+        if (isAvailable) {
+          Voice.onSpeechStart = onSpeechStart;
+          Voice.onSpeechEnd = onSpeechEnd;
+          Voice.onSpeechResults = onSpeechResults;
+          Voice.onSpeechPartialResults = onSpeechPartialResults;
+          Voice.onSpeechError = onSpeechError;
+          
+          // Start wake word listening after a small delay
+          setTimeout(() => startWakeWordListening(), 1000);
+        }
+      } catch (e) {
+        console.log('Voice init error:', e);
+      }
+    };
+
+    initVoice();
     loadUser();
     requestAudioPermission();
+
+    // Handle app state changes
+    const subscription = AppState.addEventListener('change', nextAppState => {
+      if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
+        // App came to foreground - restart wake word listening
+        if (!isRikActive && voiceSupported) {
+          startWakeWordListening();
+        }
+      } else if (nextAppState.match(/inactive|background/)) {
+        // App going to background - stop listening
+        stopListening();
+      }
+      appState.current = nextAppState;
+    });
+
     return () => {
+      Voice.destroy().then(Voice.removeAllListeners);
       if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
+      subscription.remove();
     };
   }, []);
 
@@ -75,14 +123,136 @@ export default function RikScreen() {
   useEffect(() => {
     if (isRikActive) {
       startPulseAnimation();
+      stopWakeWordListening();
     } else {
       pulseAnim.setValue(1);
+      // Restart wake word listening when Rik is deactivated
+      if (voiceSupported && !isWakeWordListening) {
+        setTimeout(() => startWakeWordListening(), 500);
+      }
     }
   }, [isRikActive]);
 
+  // Wake word pulse animation
+  useEffect(() => {
+    if (isWakeWordListening) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(wakeWordPulse, { toValue: 1.05, duration: 1500, useNativeDriver: true }),
+          Animated.timing(wakeWordPulse, { toValue: 1, duration: 1500, useNativeDriver: true }),
+        ])
+      ).start();
+    } else {
+      wakeWordPulse.setValue(1);
+    }
+  }, [isWakeWordListening]);
+
+  // Voice Recognition Handlers
+  const onSpeechStart = () => {
+    setIsListening(true);
+  };
+
+  const onSpeechEnd = () => {
+    setIsListening(false);
+  };
+
+  const onSpeechResults = (e: SpeechResultsEvent) => {
+    const text = e.value?.[0] || '';
+    setRecognizedText(text);
+    
+    if (isRikActive) {
+      // In active mode, send the recognized text as a command
+      if (text.trim()) {
+        setInputText(text);
+        // Auto-send after recognition
+        setTimeout(() => sendMessage(text), 500);
+      }
+    }
+  };
+
+  const onSpeechPartialResults = (e: SpeechResultsEvent) => {
+    const text = e.value?.[0]?.toLowerCase() || '';
+    
+    // Check for wake word in partial results (for faster detection)
+    if (!isRikActive && (text.includes('rik') || text.includes('rick') || text.includes('ricky'))) {
+      console.log('Wake word detected:', text);
+      stopListening();
+      activateRik();
+    }
+  };
+
+  const onSpeechError = (e: SpeechErrorEvent) => {
+    console.log('Speech error:', e.error);
+    setIsListening(false);
+    
+    // Restart wake word listening if we were in that mode and not active
+    if (!isRikActive && voiceSupported) {
+      setTimeout(() => startWakeWordListening(), 1000);
+    }
+  };
+
+  const startWakeWordListening = async () => {
+    if (!voiceSupported || isRikActive) return;
+    
+    try {
+      setIsWakeWordListening(true);
+      setListeningStatus('Listening for "Rik"...');
+      await Voice.start('en-US');
+    } catch (e) {
+      console.log('Start listening error:', e);
+      setIsWakeWordListening(false);
+      setListeningStatus('Tap mic or say "Rik"');
+    }
+  };
+
+  const stopWakeWordListening = async () => {
+    try {
+      setIsWakeWordListening(false);
+      await Voice.stop();
+      await Voice.cancel();
+    } catch (e) {
+      console.log('Stop listening error:', e);
+    }
+  };
+
+  const startVoiceInput = async () => {
+    if (!voiceSupported) {
+      Alert.alert('Voice Not Available', 'Voice recognition is not available on this device. Please type instead.');
+      return;
+    }
+    
+    try {
+      await Speech.stop(); // Stop any TTS first
+      setIsListening(true);
+      setRecognizedText('');
+      await Voice.start('en-US');
+    } catch (e) {
+      console.log('Voice input error:', e);
+      setIsListening(false);
+    }
+  };
+
+  const stopListening = async () => {
+    try {
+      await Voice.stop();
+      await Voice.cancel();
+      setIsListening(false);
+      setIsWakeWordListening(false);
+    } catch (e) {
+      console.log('Stop error:', e);
+    }
+  };
+
   const requestAudioPermission = async () => {
     try {
-      await Audio.requestPermissionsAsync();
+      const { status } = await Audio.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert(
+          'Microphone Permission Required',
+          'Please enable microphone access for voice commands and "Hey Rik" wake word detection.',
+          [{ text: 'OK' }]
+        );
+      }
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
@@ -125,65 +295,73 @@ export default function RikScreen() {
     if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
     inactivityTimer.current = setTimeout(() => {
       if (isRikActive) {
-        speak("Going to sleep. Say my name when you need me.");
-        setTimeout(() => setIsRikActive(false), 2000);
+        speak("Going to sleep. Say Rik when you need me.");
+        setTimeout(() => {
+          setIsRikActive(false);
+          setCurrentMode('general');
+        }, 2000);
       }
     }, 60000);
   };
 
   const activateRik = async () => {
+    await stopListening();
     setIsRikActive(true);
     resetInactivityTimer();
     
-    // Check if routine is learned
+    // Rik greets
+    let greeting = '';
     if (rikStatus && !rikStatus.routine_learned) {
-      const greeting = `Hey ${userName}! Before I can help you properly, I need to learn your actual daily routine. Want me to ask you a few questions? Just say yes or type 'learn my routine'.`;
-      speak(greeting);
-      addMessage('assistant', greeting);
+      greeting = `Hey ${userName}! Before I can help you properly, I need to learn your routine. Say "learn my routine" to get started.`;
     } else {
-      const greeting = `${rikStatus?.greeting || 'Hey'} ${userName}! You've done ${rikStatus?.schedule_completed || 0} of ${rikStatus?.schedule_total || 0} tasks. What do you need?`;
-      speak(greeting);
-      addMessage('assistant', greeting);
+      greeting = `${rikStatus?.greeting || 'Hey'} ${userName}! You've done ${rikStatus?.schedule_completed || 0} of ${rikStatus?.schedule_total || 0} tasks. What do you need?`;
     }
+    
+    speak(greeting);
+    addMessage('assistant', greeting);
+  };
+
+  const deactivateRik = () => {
+    setIsRikActive(false);
+    setCurrentMode('general');
+    Speech.stop();
+    if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
+    
+    // Restart wake word listening
+    setTimeout(() => startWakeWordListening(), 500);
   };
 
   const speak = async (text: string) => {
-    // Stop any ongoing speech first
     await Speech.stop();
     
     // Get available voices and try to use a better one
     const voices = await Speech.getAvailableVoicesAsync();
-    
-    // Try to find a good male voice (Rik should sound confident)
-    // On iOS: "com.apple.ttsbundle.Daniel-compact" or "com.apple.voice.compact.en-GB.Daniel"
-    // On Android: varies by device
     let selectedVoice = voices.find(v => 
       v.name?.toLowerCase().includes('daniel') || 
       v.name?.toLowerCase().includes('james') ||
-      v.name?.toLowerCase().includes('tom') ||
       v.identifier?.includes('Daniel')
     )?.identifier;
     
-    // Fallback to any English male-sounding voice
     if (!selectedVoice) {
       selectedVoice = voices.find(v => 
-        v.language?.startsWith('en') && 
-        (v.name?.toLowerCase().includes('male') || v.quality === 'Enhanced')
+        v.language?.startsWith('en') && v.quality === 'Enhanced'
       )?.identifier;
     }
     
     Speech.speak(text, {
-      language: 'en-GB', // British English often sounds cleaner
-      pitch: 0.95, // Slightly lower pitch for authority
-      rate: 1.0, // Natural speed - not too slow
+      language: 'en-GB',
+      pitch: 0.95,
+      rate: 1.0,
       voice: selectedVoice,
-      onDone: () => resetInactivityTimer(),
+      onDone: () => {
+        resetInactivityTimer();
+        // After Rik speaks, start listening for user response
+        if (isRikActive) {
+          setTimeout(() => startVoiceInput(), 300);
+        }
+      },
       onError: (error) => console.log('Speech error:', error),
     });
-  };
-
-  const stopSpeaking = () => {
-    Speech.stop();
   };
 
   const addMessage = (role: 'user' | 'assistant', content: string, type?: string) => {
@@ -192,48 +370,27 @@ export default function RikScreen() {
     setTimeout(() => scrollViewRef.current?.scrollToEnd(), 100);
   };
 
-  const startRecording = async () => {
-    try {
-      setIsRecording(true);
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
-      setRecording(recording);
-    } catch (err) {
-      console.error('Recording error:', err);
-      setIsRecording(false);
-      Alert.alert('Error', 'Could not start recording. Please type instead.');
-    }
-  };
-
-  const stopRecording = async () => {
-    if (!recording) return;
-    
-    setIsRecording(false);
-    await recording.stopAndUnloadAsync();
-    const uri = recording.getURI();
-    setRecording(null);
-    
-    // For now, prompt user to type - voice-to-text requires additional API
-    Alert.alert(
-      'Voice Input',
-      'Voice recognition requires external API. Please type your message for now.',
-      [{ text: 'OK' }]
-    );
-  };
-
   const sendMessage = async (text: string, context?: string) => {
     if (!userId || !text.trim()) return;
     
+    await stopListening();
     const message = text.trim().toLowerCase();
     resetInactivityTimer();
     
-    // Check for special commands
+    // Check for deactivation commands
     if (message.includes('over') && message.includes('out')) {
-      speak('Going to sleep. Call me when you need me.');
+      speak('Going to sleep. Say Rik when you need me.');
       addMessage('user', text);
-      addMessage('assistant', 'Going to sleep. Call me when you need me.');
-      setTimeout(() => setIsRikActive(false), 2000);
+      addMessage('assistant', 'Going to sleep. Say Rik when you need me.');
+      setTimeout(deactivateRik, 2000);
+      return;
+    }
+    
+    if (message.includes('stop') || message.includes('bye') || message.includes('sleep')) {
+      speak('Okay, going to sleep. Say Rik to wake me.');
+      addMessage('user', text);
+      addMessage('assistant', 'Going to sleep. Say Rik to wake me.');
+      setTimeout(deactivateRik, 2000);
       return;
     }
     
@@ -246,13 +403,13 @@ export default function RikScreen() {
       chatContext = 'planning_day';
       setCurrentMode('planning_day');
     } else if (message.includes('generate') && message.includes('schedule')) {
-      // Generate schedule
       generateSchedule();
       return;
     }
     
     addMessage('user', text);
     setInputText('');
+    setRecognizedText('');
     setIsProcessing(true);
     
     try {
@@ -270,15 +427,6 @@ export default function RikScreen() {
         const data = await res.json();
         addMessage('assistant', data.response, data.response_type);
         speak(data.response);
-        
-        // Handle special actions
-        if (data.action_required === 'generate_schedule') {
-          // Show generate button
-        } else if (data.response_type === 'suggest_learning') {
-          setCurrentMode('learning_routine');
-        }
-        
-        // Refresh status
         fetchRikStatus();
       }
     } catch (e) {
@@ -296,7 +444,7 @@ export default function RikScreen() {
     
     addMessage('user', 'Generate my schedule');
     setIsProcessing(true);
-    speak("Creating your schedule based on what I know about you. One moment.");
+    speak("Creating your schedule. One moment.");
     
     try {
       const res = await fetch(`${API_URL}/api/rik/generate-smart-schedule`, {
@@ -307,7 +455,7 @@ export default function RikScreen() {
       
       if (res.ok) {
         const data = await res.json();
-        const msg = `Done! I've created ${data.count} tasks for today based on your routine. Check the Schedule tab to see your day.`;
+        const msg = `Done! ${data.count} tasks ready. Check your Schedule tab.`;
         addMessage('assistant', msg);
         speak(msg);
         fetchRikStatus();
@@ -323,7 +471,6 @@ export default function RikScreen() {
 
   const learnRoutine = async () => {
     if (!userId) return;
-    
     setIsProcessing(true);
     
     try {
@@ -333,8 +480,9 @@ export default function RikScreen() {
       
       if (res.ok) {
         const data = await res.json();
-        addMessage('assistant', `Got it! I've saved your routine. Here's what I understood:\n\n${data.routine}\n\nNow I can create better schedules for you!`);
-        speak("Perfect! I've learned your routine. Now I can help you better.");
+        const msg = "Perfect! I've saved your routine. Now I can help you better.";
+        addMessage('assistant', msg);
+        speak(msg);
         fetchRikStatus();
         setCurrentMode('general');
       }
@@ -345,37 +493,18 @@ export default function RikScreen() {
     }
   };
 
-  const getMorningBriefing = async () => {
-    if (!userId) return;
-    
-    setIsProcessing(true);
-    
-    try {
-      const res = await fetch(`${API_URL}/api/rik/morning-briefing/${userId}`);
-      if (res.ok) {
-        const data = await res.json();
-        addMessage('assistant', data.briefing);
-        speak(data.briefing);
-      }
-    } catch (e) {
-      console.error('Error:', e);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
   const quickActions = [
-    { text: "Learn my routine", icon: "school", action: () => sendMessage("Learn my routine", 'learning_routine') },
-    { text: "Plan my day", icon: "calendar", action: () => sendMessage("Help me plan my day", 'planning_day') },
-    { text: "Morning briefing", icon: "sunny", action: getMorningBriefing },
-    { text: "Generate schedule", icon: "flash", action: generateSchedule },
+    { text: "Learn my routine", icon: "school", cmd: "Learn my routine" },
+    { text: "Plan my day", icon: "calendar", cmd: "Help me plan my day" },
+    { text: "Generate schedule", icon: "flash", cmd: "Generate my schedule" },
+    { text: "Morning briefing", icon: "sunny", cmd: "Give me my morning briefing" },
   ];
 
   const quickResponses = [
     "What should I do now?",
-    "I'm feeling unmotivated",
+    "I'm feeling unmotivated", 
     "Check my progress",
-    "Over & Out",
+    "Over and out",
   ];
 
   return (
@@ -394,9 +523,9 @@ export default function RikScreen() {
           </View>
           <View style={styles.headerRight}>
             <Text style={styles.time}>{format(new Date(), 'HH:mm')}</Text>
-            {!rikStatus?.routine_learned && (
-              <View style={styles.warningBadge}>
-                <Ionicons name="warning" size={12} color="#f59e0b" />
+            {isWakeWordListening && (
+              <View style={styles.listeningBadge}>
+                <Ionicons name="ear" size={12} color="#10b981" />
               </View>
             )}
           </View>
@@ -415,21 +544,25 @@ export default function RikScreen() {
             </View>
             <View style={[styles.statusCard, !rikStatus?.routine_learned && styles.statusCardWarning]}>
               <Ionicons name={rikStatus?.routine_learned ? "checkmark-circle" : "alert-circle"} size={24} color={rikStatus?.routine_learned ? "#10b981" : "#f59e0b"} />
-              <Text style={styles.statusLabel}>{rikStatus?.routine_learned ? "Routine Set" : "Setup Needed"}</Text>
+              <Text style={styles.statusLabel}>{rikStatus?.routine_learned ? "Ready" : "Setup"}</Text>
             </View>
           </View>
         )}
 
-        {/* Rik Avatar */}
+        {/* Rik Avatar - Inactive State */}
         {!isRikActive ? (
           <View style={styles.rikSection}>
             <TouchableOpacity onPress={activateRik} activeOpacity={0.8}>
-              <View style={styles.rikAvatar}>
-                <Ionicons name="mic-outline" size={48} color="#6366f1" />
-              </View>
+              <Animated.View style={[styles.rikAvatar, { transform: [{ scale: wakeWordPulse }] }]}>
+                <Ionicons name={isWakeWordListening ? "ear" : "mic-outline"} size={48} color="#6366f1" />
+              </Animated.View>
             </TouchableOpacity>
-            <Text style={styles.rikLabel}>Tap to talk to Rik</Text>
-            <Text style={styles.rikHint}>Voice will sound better on your phone</Text>
+            <Text style={styles.rikLabel}>
+              {isWakeWordListening ? 'Say "Rik" to activate' : 'Tap to talk to Rik'}
+            </Text>
+            <Text style={styles.rikHint}>
+              {isWakeWordListening ? '🎤 Listening for wake word...' : 'Voice works better on your phone'}
+            </Text>
             
             {/* Quick Actions */}
             <View style={styles.quickActions}>
@@ -437,7 +570,7 @@ export default function RikScreen() {
                 <TouchableOpacity 
                   key={i} 
                   style={styles.quickAction}
-                  onPress={() => { activateRik(); setTimeout(action.action, 500); }}
+                  onPress={() => { activateRik(); setTimeout(() => sendMessage(action.cmd), 1000); }}
                 >
                   <Ionicons name={action.icon as any} size={20} color="#6366f1" />
                   <Text style={styles.quickActionText}>{action.text}</Text>
@@ -464,6 +597,19 @@ export default function RikScreen() {
                     <Text style={styles.saveModeBtnText}>Save Routine</Text>
                   </TouchableOpacity>
                 )}
+              </View>
+            )}
+
+            {/* Active Listening Indicator */}
+            {isListening && (
+              <View style={styles.activeListeningBar}>
+                <Ionicons name="mic" size={16} color="#10b981" />
+                <Text style={styles.activeListeningText}>
+                  {recognizedText || 'Listening...'}
+                </Text>
+                <TouchableOpacity onPress={stopListening}>
+                  <Ionicons name="close-circle" size={20} color="#ef4444" />
+                </TouchableOpacity>
               </View>
             )}
 
@@ -510,15 +656,14 @@ export default function RikScreen() {
             {/* Input */}
             <View style={styles.inputContainer}>
               <TouchableOpacity 
-                style={[styles.micButton, isRecording && styles.micButtonRecording]}
-                onPressIn={startRecording}
-                onPressOut={stopRecording}
+                style={[styles.micButton, isListening && styles.micButtonActive]}
+                onPress={isListening ? stopListening : startVoiceInput}
               >
-                <Ionicons name={isRecording ? "radio" : "mic"} size={20} color="#fff" />
+                <Ionicons name={isListening ? "stop" : "mic"} size={20} color="#fff" />
               </TouchableOpacity>
               <TextInput
                 style={styles.input}
-                placeholder="Type your message..."
+                placeholder="Type or tap mic to speak..."
                 placeholderTextColor="#6b7280"
                 value={inputText}
                 onChangeText={setInputText}
@@ -551,8 +696,9 @@ const styles = StyleSheet.create({
   statusText: { color: '#6b7280', fontSize: 13, marginTop: 4 },
   headerRight: { alignItems: 'flex-end' },
   time: { color: '#6366f1', fontSize: 24, fontWeight: 'bold' },
-  warningBadge: {
-    backgroundColor: '#f59e0b20', padding: 4, borderRadius: 8, marginTop: 4,
+  listeningBadge: {
+    backgroundColor: '#10b98120', padding: 4, borderRadius: 8, marginTop: 4,
+    flexDirection: 'row', alignItems: 'center', gap: 4,
   },
   statusCards: { flexDirection: 'row', paddingHorizontal: 20, gap: 12, marginBottom: 16 },
   statusCard: {
@@ -587,6 +733,12 @@ const styles = StyleSheet.create({
   modeText: { color: '#6366f1', fontSize: 13, flex: 1 },
   saveModeBtn: { backgroundColor: '#6366f1', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6 },
   saveModeBtnText: { color: '#fff', fontSize: 12, fontWeight: '600' },
+  activeListeningBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#10b98120', marginHorizontal: 20, marginBottom: 8,
+    padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#10b981',
+  },
+  activeListeningText: { color: '#10b981', fontSize: 13, flex: 1 },
   messagesContainer: { flex: 1, paddingHorizontal: 20 },
   messagesContent: { paddingBottom: 8 },
   messageBubble: { maxWidth: '80%', padding: 12, borderRadius: 16, marginBottom: 8 },
@@ -608,7 +760,7 @@ const styles = StyleSheet.create({
     width: 44, height: 44, borderRadius: 22, backgroundColor: '#374151',
     alignItems: 'center', justifyContent: 'center',
   },
-  micButtonRecording: { backgroundColor: '#ef4444' },
+  micButtonActive: { backgroundColor: '#10b981' },
   input: {
     flex: 1, backgroundColor: '#1f2937', borderRadius: 22,
     paddingHorizontal: 18, paddingVertical: 10, color: '#fff', fontSize: 15,
