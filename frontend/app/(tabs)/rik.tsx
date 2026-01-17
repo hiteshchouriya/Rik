@@ -429,6 +429,7 @@ export default function RikScreen() {
               </View>
             </TouchableOpacity>
             <Text style={styles.rikLabel}>Tap to talk to Rik</Text>
+            <Text style={styles.rikHint}>Voice will sound better on your phone</Text>
             
             {/* Quick Actions */}
             <View style={styles.quickActions}>
